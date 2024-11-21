@@ -100,18 +100,31 @@ impl Drop for RuntimeSingleton {
 
 impl RuntimeSingleton {
   async fn handle_message(
-    runtime: &mut Runtime,
+    runtime: Arc<Mutex<Runtime>>,
     msg: Result<Message, async_channel::RecvError>,
   ) -> Result<(), AnyError> {
     match msg {
       Ok(Message::Run(f)) => {
-        f(runtime);
+        f(&mut runtime.lock());
       }
       Ok(Message::Dispatch(args)) => {
-        log::debug!("Handle dispatch: {} {}", args.method, args.uri);
+        log::debug!(
+          "Handle dispatch: {} {} {}",
+          args.method,
+          args.uri,
+          runtime.is_locked()
+        );
         let channel = args.reply;
 
-        let result: Result<JsResponse, JsResponseError> = runtime
+        // let foo = runtime.lock();
+        // let lock = runtime.lock();
+        //
+        // let rt : &mut Runtime = unsafe {
+        //   std::mem::transmute(runtime.raw())
+        // };
+
+        let result = runtime
+          .lock()
           .call_function_async::<JsResponse>(
             None,
             "__dispatch",
@@ -132,12 +145,13 @@ impl RuntimeSingleton {
       }
       Ok(Message::CallFunction(module, name, args, sender)) => {
         let module_handle = if let Some(module) = module {
-          runtime.load_module_async(&module).await.ok()
+          runtime.lock().load_module_async(&module).await.ok()
         } else {
           None
         };
 
         let result: Result<serde_json::Value, AnyError> = runtime
+          .lock()
           .call_function_async::<serde_json::Value>(module_handle.as_ref(), name, &args)
           .await
           .map_err(|err| err.into());
@@ -147,7 +161,7 @@ impl RuntimeSingleton {
         }
       }
       Ok(Message::LoadModule(module, sender)) => {
-        if let Err(err) = runtime.load_module_async(&module).await {
+        if let Err(err) = runtime.lock().load_module_async(&module).await {
           log::error!("{err}");
         }
         sender.send(Ok(())).unwrap();
@@ -190,7 +204,7 @@ impl RuntimeSingleton {
       })
       .unzip();
 
-    let handle = std::thread::spawn(move || {
+    let root_thread = std::thread::spawn(move || {
       init_platform(n_threads as u32, true);
 
       let threads: Vec<_> = receivers
@@ -201,8 +215,6 @@ impl RuntimeSingleton {
 
           return std::thread::spawn(move || {
             let tokio_runtime = std::rc::Rc::new(
-              // tokio::runtime::Builder::new_multi_thread()
-              //   .worker_threads(2)
               tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .enable_io()
@@ -211,30 +223,83 @@ impl RuntimeSingleton {
                 .unwrap(),
             );
 
-            let mut runtime = match Self::init_runtime(index, tokio_runtime.clone()) {
-              Ok(runtime) => runtime,
+            let js_runtime = match Self::init_runtime(index, tokio_runtime.clone()) {
+              Ok(js_runtime) => Arc::new(Mutex::new(js_runtime)),
               Err(err) => {
                 panic!("Failed to init v8 runtime on thread {index}: {err}");
               }
             };
 
             tokio_runtime.block_on(async move {
-              loop {
-                log::debug!("Loop");
-                tokio::select! {
-                  msg = receiver.recv() => {
-                    if let Err(err) = Self::handle_message(&mut runtime, msg).await {
-                      log::error!("Failed to handle message: {err}");
-                    }
-                  },
-                  msg = shared_receiver.recv() => {
-                    if let Err(err) = Self::handle_message(&mut runtime, msg).await {
-                      log::error!("Failed to handle message: {err}");
+              tokio::task::LocalSet::new()
+                .run_until(async move {
+                  // tokio::task::spawn_local(async {});
+
+                  loop {
+                    log::debug!("Loop");
+                    tokio::select! {
+                      msg = receiver.recv() => {
+                        let rt = js_runtime.clone();
+                        tokio::task::spawn_local(async move {
+                          if let Err(err) = Self::handle_message(rt, msg).await {
+                            log::error!("Failed to handle message: {err}");
+                          }
+                        });
+                      },
+                      msg = shared_receiver.recv() => {
+                        let rt = js_runtime.clone();
+                        tokio::task::spawn_local(async move {
+                          if let Err(err) = Self::handle_message(rt, msg).await {
+                            log::error!("Failed to handle message: {err}");
+                          }
+                        });
+                      }
                     }
                   }
-                }
-              }
+                })
+                .await;
             });
+
+            // let mut futures = tokio::task::JoinSet::<()>::new();
+            //
+            // let rt = js_runtime.clone();
+            // futures.spawn_local(async move {
+            //     log::debug!("BAR");
+            //   if let Err(err) = Self::handle_message(rt, receiver.recv().await).await {
+            //     log::error!("Failed to handle message: {err}");
+            //   }
+            // });
+            //
+            // // let rt = js_runtime.clone();
+            // // futures.spawn_local(async move {
+            // //     log::debug!("FOOO");
+            // //   if let Err(err) = Self::handle_message(rt, shared_receiver.recv().await).await {
+            // //     log::error!("Failed to handle message: {err}");
+            // //   }
+            // // });
+            //
+            // tokio_runtime.block_on(async move {
+            //   while let Some(Ok(_)) = futures.join_next().await {
+            //   }
+            // })
+
+            // tokio_runtime.block_on(async move {
+            //   loop {
+            //     log::debug!("Loop");
+            //     tokio::select! {
+            //       msg = receiver.recv() => {
+            //         if let Err(err) = Self::handle_message(js_runtime, msg).await {
+            //           log::error!("Failed to handle message: {err}");
+            //         }
+            //       },
+            //       msg = shared_receiver.recv() => {
+            //         if let Err(err) = Self::handle_message(js_runtime, msg).await {
+            //           log::error!("Failed to handle message: {err}");
+            //         }
+            //       }
+            //     }
+            //   }
+            // });
           });
         })
         .collect();
@@ -249,7 +314,7 @@ impl RuntimeSingleton {
     return RuntimeSingleton {
       n_threads,
       sender: shared_sender,
-      handle: Some(handle),
+      handle: Some(root_thread),
       state,
     };
   }
