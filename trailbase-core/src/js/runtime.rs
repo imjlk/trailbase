@@ -5,7 +5,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use libsql::Connection;
 use parking_lot::Mutex;
-use rustyscript::{init_platform, json_args, Module, Runtime};
+use rustyscript::{
+  deno_core::PollEventLoopOptions, init_platform, js_value::Promise, json_args, Module, Runtime,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::from_value;
 use std::collections::HashSet;
@@ -100,44 +102,41 @@ impl Drop for RuntimeSingleton {
 
 impl RuntimeSingleton {
   async fn handle_message(
-    runtime: Arc<Mutex<Runtime>>,
+    runtime: &mut Runtime,
     msg: Result<Message, async_channel::RecvError>,
   ) -> Result<(), AnyError> {
     match msg {
       Ok(Message::Run(f)) => {
-        f(&mut runtime.lock());
+        f(runtime);
       }
       Ok(Message::Dispatch(args)) => {
-        log::debug!(
-          "Handle dispatch: {} {} {}",
-          args.method,
-          args.uri,
-          runtime.is_locked()
-        );
+        log::debug!("Handle dispatch: {} {}", args.method, args.uri,);
         let channel = args.reply;
+        let promise = match runtime.call_function_immediate::<Promise<JsResponse>>(
+          None,
+          "__dispatch",
+          json_args!(
+            args.method,
+            args.route_path,
+            args.uri,
+            args.path_params,
+            args.headers,
+            args.user,
+            args.body
+          ),
+        ) {
+          Ok(promise) => promise,
+          Err(err) => {
+            channel
+              .send(Err(JsResponseError::Internal(err.into())))
+              .unwrap();
+            return Ok(());
+          }
+        };
 
-        // let foo = runtime.lock();
-        // let lock = runtime.lock();
-        //
-        // let rt : &mut Runtime = unsafe {
-        //   std::mem::transmute(runtime.raw())
-        // };
-
-        let result = runtime
-          .lock()
-          .call_function_async::<JsResponse>(
-            None,
-            "__dispatch",
-            json_args!(
-              args.method,
-              args.route_path,
-              args.uri,
-              args.path_params,
-              args.headers,
-              args.user,
-              args.body
-            ),
-          )
+        // FIXME: Here we await the future blocking the event loop from progressing.
+        let result = promise
+          .into_future(runtime)
           .await
           .map_err(|err| JsResponseError::Internal(err.into()));
 
@@ -145,13 +144,12 @@ impl RuntimeSingleton {
       }
       Ok(Message::CallFunction(module, name, args, sender)) => {
         let module_handle = if let Some(module) = module {
-          runtime.lock().load_module_async(&module).await.ok()
+          runtime.load_module_async(&module).await.ok()
         } else {
           None
         };
 
         let result: Result<serde_json::Value, AnyError> = runtime
-          .lock()
           .call_function_async::<serde_json::Value>(module_handle.as_ref(), name, &args)
           .await
           .map_err(|err| err.into());
@@ -161,7 +159,7 @@ impl RuntimeSingleton {
         }
       }
       Ok(Message::LoadModule(module, sender)) => {
-        if let Err(err) = runtime.lock().load_module_async(&module).await {
+        if let Err(err) = runtime.load_module_async(&module).await {
           log::error!("{err}");
         }
         sender.send(Ok(())).unwrap();
@@ -172,6 +170,38 @@ impl RuntimeSingleton {
     }
 
     return Ok(());
+  }
+
+  async fn event_loop(
+    runtime: &mut Runtime,
+    private_recv: async_channel::Receiver<Message>,
+    shared_recv: async_channel::Receiver<Message>,
+  ) {
+    // tokio::task::spawn_local(async {});
+
+    loop {
+      log::debug!("Loop");
+
+      tokio::select! {
+        msg = private_recv.recv() => {
+            if let Err(err) = Self::handle_message(runtime, msg).await {
+              log::error!("Failed to handle message: {err}");
+            }
+        },
+        msg = shared_recv.recv() => {
+            if let Err(err) = Self::handle_message(runtime, msg).await {
+              log::error!("Failed to handle message: {err}");
+            }
+        }
+      }
+
+      if let Err(err) = runtime
+        .await_event_loop(PollEventLoopOptions::default(), None)
+        .await
+      {
+        log::error!("Event loop failed: {err}");
+      }
+    }
   }
 
   fn new_with_threads(threads: Option<usize>) -> Self {
@@ -223,8 +253,8 @@ impl RuntimeSingleton {
                 .unwrap(),
             );
 
-            let js_runtime = match Self::init_runtime(index, tokio_runtime.clone()) {
-              Ok(js_runtime) => Arc::new(Mutex::new(js_runtime)),
+            let mut js_runtime = match Self::init_runtime(index, tokio_runtime.clone()) {
+              Ok(js_runtime) => js_runtime,
               Err(err) => {
                 panic!("Failed to init v8 runtime on thread {index}: {err}");
               }
@@ -232,74 +262,9 @@ impl RuntimeSingleton {
 
             tokio_runtime.block_on(async move {
               tokio::task::LocalSet::new()
-                .run_until(async move {
-                  // tokio::task::spawn_local(async {});
-
-                  loop {
-                    log::debug!("Loop");
-                    tokio::select! {
-                      msg = receiver.recv() => {
-                        let rt = js_runtime.clone();
-                        tokio::task::spawn_local(async move {
-                          if let Err(err) = Self::handle_message(rt, msg).await {
-                            log::error!("Failed to handle message: {err}");
-                          }
-                        });
-                      },
-                      msg = shared_receiver.recv() => {
-                        let rt = js_runtime.clone();
-                        tokio::task::spawn_local(async move {
-                          if let Err(err) = Self::handle_message(rt, msg).await {
-                            log::error!("Failed to handle message: {err}");
-                          }
-                        });
-                      }
-                    }
-                  }
-                })
+                .run_until(Self::event_loop(&mut js_runtime, receiver, shared_receiver))
                 .await;
             });
-
-            // let mut futures = tokio::task::JoinSet::<()>::new();
-            //
-            // let rt = js_runtime.clone();
-            // futures.spawn_local(async move {
-            //     log::debug!("BAR");
-            //   if let Err(err) = Self::handle_message(rt, receiver.recv().await).await {
-            //     log::error!("Failed to handle message: {err}");
-            //   }
-            // });
-            //
-            // // let rt = js_runtime.clone();
-            // // futures.spawn_local(async move {
-            // //     log::debug!("FOOO");
-            // //   if let Err(err) = Self::handle_message(rt, shared_receiver.recv().await).await {
-            // //     log::error!("Failed to handle message: {err}");
-            // //   }
-            // // });
-            //
-            // tokio_runtime.block_on(async move {
-            //   while let Some(Ok(_)) = futures.join_next().await {
-            //   }
-            // })
-
-            // tokio_runtime.block_on(async move {
-            //   loop {
-            //     log::debug!("Loop");
-            //     tokio::select! {
-            //       msg = receiver.recv() => {
-            //         if let Err(err) = Self::handle_message(js_runtime, msg).await {
-            //           log::error!("Failed to handle message: {err}");
-            //         }
-            //       },
-            //       msg = shared_receiver.recv() => {
-            //         if let Err(err) = Self::handle_message(js_runtime, msg).await {
-            //           log::error!("Failed to handle message: {err}");
-            //         }
-            //       }
-            //     }
-            //   }
-            // });
           });
         })
         .collect();
