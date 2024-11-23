@@ -100,18 +100,44 @@ impl Drop for RuntimeSingleton {
   }
 }
 
+struct Completer {
+  name: String,
+  promise: Promise<JsResponse>,
+  reply: tokio::sync::oneshot::Sender<Result<JsResponse, JsResponseError>>,
+}
+
+impl Completer {
+  fn is_ready(&self, runtime: &mut Runtime) -> bool {
+    return !self.promise.is_pending(runtime);
+  }
+
+  async fn resolve(self, runtime: &mut Runtime) {
+    let value = self
+      .promise
+      .into_future(runtime)
+      .await
+      .map_err(|err| JsResponseError::Internal(err.into()));
+
+    if self.reply.send(value).is_err() {
+      log::error!("Completer send failed for : {}", self.name);
+    }
+  }
+}
+
 impl RuntimeSingleton {
   async fn handle_message(
     runtime: &mut Runtime,
-    msg: Result<Message, async_channel::RecvError>,
+    msg: Message,
+    completers: &mut Vec<Completer>,
   ) -> Result<(), AnyError> {
     match msg {
-      Ok(Message::Run(f)) => {
+      Message::Run(f) => {
         f(runtime);
       }
-      Ok(Message::Dispatch(args)) => {
-        log::debug!("Handle dispatch: {} {}", args.method, args.uri,);
+      Message::Dispatch(args) => {
+        // log::debug!("Handle dispatch: {} {}", args.method, args.uri,);
         let channel = args.reply;
+        let uri = args.uri.clone();
         let promise = match runtime.call_function_immediate::<Promise<JsResponse>>(
           None,
           "__dispatch",
@@ -127,22 +153,23 @@ impl RuntimeSingleton {
         ) {
           Ok(promise) => promise,
           Err(err) => {
-            channel
+            if channel
               .send(Err(JsResponseError::Internal(err.into())))
-              .unwrap();
+              .is_err()
+            {
+              log::error!("dispatch sending error failed");
+            }
             return Ok(());
           }
         };
 
-        // FIXME: Here we await the future blocking the event loop from progressing.
-        let result = promise
-          .into_future(runtime)
-          .await
-          .map_err(|err| JsResponseError::Internal(err.into()));
-
-        channel.send(result).unwrap();
+        completers.push(Completer {
+          name: uri,
+          promise,
+          reply: channel,
+        });
       }
-      Ok(Message::CallFunction(module, name, args, sender)) => {
+      Message::CallFunction(module, name, args, sender) => {
         let module_handle = if let Some(module) = module {
           runtime.load_module_async(&module).await.ok()
         } else {
@@ -154,54 +181,69 @@ impl RuntimeSingleton {
           .await
           .map_err(|err| err.into());
 
-        if let Err(_err) = sender.send(result) {
+        if sender.send(result).is_err() {
           log::error!("Sending of js function call reply failed");
         }
       }
-      Ok(Message::LoadModule(module, sender)) => {
+      Message::LoadModule(module, sender) => {
         if let Err(err) = runtime.load_module_async(&module).await {
           log::error!("{err}");
         }
-        sender.send(Ok(())).unwrap();
-      }
-      Err(err) => {
-        return Err(format!("channel closed: {err}").into());
+        if sender.send(Ok(())).is_err() {
+          log::error!("Load module send failed");
+        }
       }
     }
 
     return Ok(());
   }
 
-  async fn event_loop(
+  fn event_loop(
     runtime: &mut Runtime,
     private_recv: async_channel::Receiver<Message>,
     shared_recv: async_channel::Receiver<Message>,
   ) {
-    // tokio::task::spawn_local(async {});
+    runtime.tokio_runtime().block_on(async {
+      let mut completers: Vec<Completer> = vec![];
 
-    loop {
-      log::debug!("Loop");
+      loop {
+        let mut completed = vec![];
+        for (index, completer) in completers.iter().enumerate() {
+          if completer.is_ready(runtime) {
+            completed.push(index);
+          }
+        }
 
-      tokio::select! {
-        msg = private_recv.recv() => {
-            if let Err(err) = Self::handle_message(runtime, msg).await {
-              log::error!("Failed to handle message: {err}");
+        for index in completed.iter().rev() {
+          let completer = completers.swap_remove(*index);
+          completer.resolve(runtime).await;
+        }
+
+        tokio::select! {
+          result = runtime.await_event_loop(PollEventLoopOptions::default(), Some(std::time::Duration::from_millis(25))), if !completed.is_empty() => {
+            if let Err(err) = result{
+              log::error!("{err}");
             }
-        },
-        msg = shared_recv.recv() => {
-            if let Err(err) = Self::handle_message(runtime, msg).await {
-              log::error!("Failed to handle message: {err}");
+          },
+          msg = private_recv.recv() => {
+            let Ok(msg) = msg else {
+              panic!("private channel closed");
+            };
+            if let Err(err) = Self::handle_message(runtime, msg, &mut completers).await {
+              log::error!("{err}");
             }
+          },
+          msg = shared_recv.recv() => {
+            let Ok(msg) = msg else {
+              panic!("private channel closed");
+            };
+            if let Err(err) = Self::handle_message(runtime, msg, &mut completers).await {
+              log::error!("{err}");
+            }
+          },
         }
       }
-
-      if let Err(err) = runtime
-        .await_event_loop(PollEventLoopOptions::default(), None)
-        .await
-      {
-        log::error!("Event loop failed: {err}");
-      }
-    }
+    });
   }
 
   fn new_with_threads(threads: Option<usize>) -> Self {
@@ -260,11 +302,7 @@ impl RuntimeSingleton {
               }
             };
 
-            tokio_runtime.block_on(async move {
-              tokio::task::LocalSet::new()
-                .run_until(Self::event_loop(&mut js_runtime, receiver, shared_receiver))
-                .await;
-            });
+            Self::event_loop(&mut js_runtime, receiver, shared_receiver);
           });
         })
         .collect();
@@ -698,10 +736,10 @@ pub(crate) async fn load_routes_from_js_modules(
 ) -> Result<Option<Router<AppState>>, AnyError> {
   let scripts_dir = state.data_dir().root().join("scripts");
 
-  let modules = match rustyscript::Module::load_dir(scripts_dir) {
+  let modules = match rustyscript::Module::load_dir(scripts_dir.clone()) {
     Ok(modules) => modules,
     Err(err) => {
-      log::debug!("Skip loading js modules: {err}");
+      log::debug!("Skip loading js modules from '{scripts_dir:?}': {err}");
       return Ok(None);
     }
   };
