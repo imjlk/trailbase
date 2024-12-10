@@ -27,7 +27,7 @@ struct InternalState {
   record_apis: Computed<Vec<(String, RecordApi)>, Config>,
   config: ValueNotifier<Config>,
 
-  logs_conn: trailbase_sqlite::Connection,
+  logs_conn: trailbase_sqlite::AsyncConnection,
   conn: trailbase_sqlite::Connection,
 
   jwt: JwtHelper,
@@ -49,7 +49,7 @@ pub(crate) struct AppStateArgs {
   pub table_metadata: TableMetadataCache,
   pub config: Config,
   pub conn: trailbase_sqlite::Connection,
-  pub logs_conn: trailbase_sqlite::Connection,
+  pub logs_conn: trailbase_sqlite::AsyncConnection,
   pub jwt: JwtHelper,
   pub object_store: Box<dyn ObjectStore + Send + Sync>,
   pub js_runtime_threads: Option<usize>,
@@ -137,7 +137,7 @@ impl AppState {
     return &self.state.conn;
   }
 
-  pub fn logs_conn(&self) -> &trailbase_sqlite::Connection {
+  pub fn logs_conn(&self) -> &trailbase_sqlite::AsyncConnection {
     return &self.state.logs_conn;
   }
 
@@ -289,12 +289,9 @@ pub async fn test_state(options: Option<TestStateOptions>) -> anyhow::Result<App
   };
 
   let logs_conn = {
-    trailbase_sqlite::Connection::from_conn(move || {
-      let mut conn = trailbase_sqlite::connect_sqlite(None, None).unwrap();
-      apply_logs_migrations(&mut conn).unwrap();
-      conn
-    })
-    .await?
+    let mut conn = trailbase_sqlite::connect_sqlite(None, None)?;
+    apply_logs_migrations(&mut conn)?;
+    trailbase_sqlite::AsyncConnection::from_conn(conn).await?
   };
 
   let table_metadata = TableMetadataCache::new(conn.clone()).await?;

@@ -57,13 +57,9 @@ pub async fn init_app_state(
 
   // Then open or init new databases.
   let logs_conn = {
-    let data_dir = data_dir.clone();
-    trailbase_sqlite::Connection::from_conn(move || {
-      let mut conn = init_logs_db(&data_dir).unwrap();
-      apply_logs_migrations(&mut conn).unwrap();
-      conn
-    })
-    .await?
+    let mut conn = init_logs_db(&data_dir)?;
+    apply_logs_migrations(&mut conn)?;
+    trailbase_sqlite::AsyncConnection::from_conn(conn).await?
   };
 
   // Open or init the main db. Note that we derive whether a new DB was initialized based on

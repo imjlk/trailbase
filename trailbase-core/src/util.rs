@@ -68,3 +68,16 @@ pub async fn query_one_row(
     rusqlite::Error::QueryReturnedNoRows,
   ));
 }
+
+pub async fn query_one_row_async(
+  conn: &trailbase_sqlite::AsyncConnection,
+  sql: &str,
+  params: impl trailbase_sqlite::Params + Send + 'static,
+) -> Result<trailbase_sqlite::Row, trailbase_sqlite::Error> {
+  if let Some(row) = conn.query_row(sql, params).await? {
+    return Ok(row);
+  }
+  return Err(trailbase_sqlite::Error::Rusqlite(
+    rusqlite::Error::QueryReturnedNoRows,
+  ));
+}

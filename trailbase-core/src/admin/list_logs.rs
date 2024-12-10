@@ -16,7 +16,7 @@ use crate::constants::{LOGS_RETENTION_DEFAULT, LOGS_TABLE_ID_COLUMN};
 use crate::listing::{
   build_filter_where_clause, limit_or_default, parse_query, Order, WhereClause,
 };
-use crate::table_metadata::{lookup_and_parse_table_schema, TableMetadata};
+use crate::table_metadata::{lookup_and_parse_table_schema_async, TableMetadata};
 use crate::util::id_to_b64;
 
 #[derive(Debug, Serialize, TS)]
@@ -109,12 +109,12 @@ pub async fn list_logs_handler(
 
   // NOTE: We cannot use state.table_metadata() here, since we're working on the logs database.
   // We could cache, however this is just the admin logs handler.
-  let table = lookup_and_parse_table_schema(conn, LOGS_TABLE_NAME).await?;
+  let table = lookup_and_parse_table_schema_async(conn, LOGS_TABLE_NAME).await?;
   let table_metadata = TableMetadata::new(table.clone(), &[table]);
   let filter_where_clause = build_filter_where_clause(&table_metadata, filter_params)?;
 
   let total_row_count = {
-    let row = crate::util::query_one_row(
+    let row = crate::util::query_one_row_async(
       conn,
       &format!(
         "SELECT COUNT(*) FROM {LOGS_TABLE_NAME} WHERE {clause}",
@@ -182,7 +182,7 @@ pub async fn list_logs_handler(
 }
 
 async fn fetch_logs(
-  conn: &trailbase_sqlite::Connection,
+  conn: &trailbase_sqlite::AsyncConnection,
   filter_where_clause: WhereClause,
   cursor: Option<[u8; 16]>,
   order: Vec<(String, Order)>,
@@ -250,7 +250,7 @@ struct FetchAggregateArgs {
 }
 
 async fn fetch_aggregate_stats(
-  conn: &trailbase_sqlite::Connection,
+  conn: &trailbase_sqlite::AsyncConnection,
   args: &FetchAggregateArgs,
 ) -> Result<Stats, Error> {
   let filter_clause = args
@@ -364,13 +364,11 @@ mod tests {
 
   #[tokio::test]
   async fn test_aggregate_rate_computation() {
-    let conn = trailbase_sqlite::Connection::from_conn(move || {
-      let mut conn_sync = trailbase_sqlite::connect_sqlite(None, None).unwrap();
-      apply_logs_migrations(&mut conn_sync).unwrap();
-      conn_sync
-    })
-    .await
-    .unwrap();
+    let mut conn_sync = trailbase_sqlite::connect_sqlite(None, None).unwrap();
+    apply_logs_migrations(&mut conn_sync).unwrap();
+    let conn = trailbase_sqlite::AsyncConnection::from_conn(conn_sync)
+      .await
+      .unwrap();
 
     let interval_seconds = 600;
     let to = DateTime::parse_from_rfc3339("1996-12-22T12:00:00Z").unwrap();

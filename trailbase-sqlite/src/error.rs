@@ -8,7 +8,7 @@ pub enum Error {
   /// operation and the underlying [`rusqlite::Error`] that made it impossible to close the
   /// database.
   #[error("Close error: {1}")]
-  Close(crate::connection::Connection, rusqlite::Error),
+  Close(crate::connection::AsyncConnection, rusqlite::Error),
 
   #[error("Rusqlite error: {0}")]
   Rusqlite(#[from] rusqlite::Error),

@@ -18,7 +18,7 @@ pub mod geoip;
 pub mod params;
 pub mod schema;
 
-pub use connection::{Connection, Row, Rows, Value, ValueType};
+pub use connection::{AsyncConnection, Connection, Row, Rows, Value, ValueType};
 pub use error::Error;
 pub use extension::connect_sqlite;
 pub use params::Params;

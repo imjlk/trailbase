@@ -553,6 +553,26 @@ pub async fn lookup_and_parse_table_schema(
   return Ok(stmt.try_into()?);
 }
 
+pub async fn lookup_and_parse_table_schema_async(
+  conn: &trailbase_sqlite::AsyncConnection,
+  table_name: &str,
+) -> Result<Table, TableLookupError> {
+  // Then get the actual table.
+  let sql: String = crate::util::query_one_row_async(
+    conn,
+    &format!("SELECT sql FROM {SQLITE_SCHEMA_TABLE} WHERE type = 'table' AND name = $1"),
+    params!(table_name.to_string()),
+  )
+  .await?
+  .get(0)?;
+
+  let Some(stmt) = sqlite3_parse_into_statement(&sql)? else {
+    return Err(TableLookupError::Missing);
+  };
+
+  return Ok(stmt.try_into()?);
+}
+
 pub(crate) fn sqlite3_parse_into_statements(
   sql: &str,
 ) -> Result<Vec<Stmt>, sqlite3_parser::lexer::sql::Error> {
