@@ -57,18 +57,34 @@ pub async fn init_app_state(
 
   // Then open or init new databases.
   let logs_conn = {
-    let mut conn = init_logs_db(&data_dir)?;
-    apply_logs_migrations(&mut conn)?;
-    trailbase_sqlite::Connection::from_conn(conn).await?
+    let data_dir = data_dir.clone();
+    trailbase_sqlite::Connection::from_conn(move || {
+      let mut conn = init_logs_db(&data_dir).unwrap();
+      apply_logs_migrations(&mut conn).unwrap();
+      conn
+    })
+    .await?
   };
 
   // Open or init the main db. Note that we derive whether a new DB was initialized based on
   // whether the V1 migration had to be applied. Should be fairly robust.
   let (conn, new_db) = {
-    let mut conn = trailbase_sqlite::connect_sqlite(Some(data_dir.main_db_path()), None)?;
-    let new_db = apply_main_migrations(&mut conn, Some(data_dir.migrations_path()))?;
+    let data_dir = data_dir.clone();
+    let new_db = {
+      let mut conn = trailbase_sqlite::connect_sqlite(Some(data_dir.main_db_path()), None).unwrap();
+      apply_main_migrations(&mut conn, Some(data_dir.migrations_path())).unwrap()
+    };
 
-    (trailbase_sqlite::Connection::from_conn(conn).await?, new_db)
+    (
+      trailbase_sqlite::Connection::from_conn(move || {
+        let mut conn =
+          trailbase_sqlite::connect_sqlite(Some(data_dir.main_db_path()), None).unwrap();
+        let _new_db = apply_main_migrations(&mut conn, Some(data_dir.migrations_path())).unwrap();
+        conn
+      })
+      .await?,
+      new_db,
+    )
   };
 
   let table_metadata = TableMetadataCache::new(conn.clone()).await?;

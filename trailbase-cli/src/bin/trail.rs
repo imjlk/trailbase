@@ -157,10 +157,9 @@ async fn async_main() -> Result<(), BoxError> {
     Some(SubCommands::Schema(cmd)) => {
       init_logger(false);
 
-      let conn = trailbase_sqlite::Connection::from_conn(api::connect_sqlite(
-        Some(data_dir.main_db_path()),
-        None,
-      )?)
+      let conn = trailbase_sqlite::Connection::from_conn(move || {
+        api::connect_sqlite(Some(data_dir.main_db_path()), None).unwrap()
+      })
       .await?;
       let table_metadata = api::TableMetadataCache::new(conn.clone()).await?;
 
@@ -201,10 +200,9 @@ async fn async_main() -> Result<(), BoxError> {
     Some(SubCommands::Admin { cmd }) => {
       init_logger(false);
 
-      let conn = trailbase_sqlite::Connection::from_conn(api::connect_sqlite(
-        Some(data_dir.main_db_path()),
-        None,
-      )?)
+      let conn = trailbase_sqlite::Connection::from_conn(move || {
+        api::connect_sqlite(Some(data_dir.main_db_path()), None).unwrap()
+      })
       .await?;
 
       match cmd {
@@ -256,10 +254,10 @@ async fn async_main() -> Result<(), BoxError> {
       init_logger(false);
 
       let data_dir = DataDir(args.data_dir);
-      let conn = trailbase_sqlite::Connection::from_conn(api::connect_sqlite(
-        Some(data_dir.main_db_path()),
-        None,
-      )?)
+      let data_dir_clone = data_dir.clone();
+      let conn = trailbase_sqlite::Connection::from_conn(move || {
+        api::connect_sqlite(Some(data_dir_clone.main_db_path()), None).unwrap()
+      })
       .await?;
 
       match cmd {

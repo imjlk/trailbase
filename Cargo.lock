@@ -6444,6 +6444,7 @@ dependencies = [
  "jsonschema",
  "lazy_static",
  "log",
+ "parking_lot",
  "rusqlite",
  "schemars",
  "serde",

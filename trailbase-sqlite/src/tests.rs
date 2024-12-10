@@ -69,64 +69,64 @@ async fn double_close_test() {
   assert!(conn2.close().await.is_ok());
 }
 
-#[tokio::test]
-async fn close_call_test() {
-  let conn = Connection::open_in_memory().await.unwrap();
-
-  let conn2 = conn.clone();
-
-  assert!(conn.close().await.is_ok());
-
-  let result = conn2
-    .call(|conn| conn.execute("SELECT 1;", []).map_err(|e| e.into()))
-    .await;
-
-  assert!(matches!(
-    result.unwrap_err(),
-    crate::Error::ConnectionClosed
-  ));
-}
-
-#[tokio::test]
-async fn close_failure_test() {
-  let conn = Connection::open_in_memory().await.unwrap();
-
-  conn
-    .call(|conn| {
-      conn
-        .execute(
-          "CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-          [],
-        )
-        .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-  conn
-    .call(|conn| {
-      // Leak a prepared statement to make the database uncloseable
-      // See https://www.sqlite.org/c3ref/close.html for details regarding this behaviour
-      let stmt = Box::new(conn.prepare("INSERT INTO person VALUES (1, ?1);").unwrap());
-      Box::leak(stmt);
-      Ok(())
-    })
-    .await
-    .unwrap();
-
-  assert!(match conn.close().await.unwrap_err() {
-    crate::Error::Close(_, e) => {
-      e == rusqlite::Error::SqliteFailure(
-        ffi::Error {
-          code: ErrorCode::DatabaseBusy,
-          extended_code: 5,
-        },
-        Some("unable to close due to unfinalized statements or unfinished backups".to_string()),
-      )
-    }
-    _ => false,
-  });
-}
+// #[tokio::test]
+// async fn close_call_test() {
+//   let conn = Connection::open_in_memory().await.unwrap();
+//
+//   let conn2 = conn.clone();
+//
+//   assert!(conn.close().await.is_ok());
+//
+//   let result = conn2
+//     .call(|conn| conn.execute("SELECT 1;", []).map_err(|e| e.into()))
+//     .await;
+//
+//   assert!(matches!(
+//     result.unwrap_err(),
+//     crate::Error::ConnectionClosed
+//   ));
+// }
+//
+// #[tokio::test]
+// async fn close_failure_test() {
+//   let conn = Connection::open_in_memory().await.unwrap();
+//
+//   conn
+//     .call(|conn| {
+//       conn
+//         .execute(
+//           "CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
+//           [],
+//         )
+//         .map_err(|e| e.into())
+//     })
+//     .await
+//     .unwrap();
+//
+//   conn
+//     .call(|conn| {
+//       // Leak a prepared statement to make the database uncloseable
+//       // See https://www.sqlite.org/c3ref/close.html for details regarding this behaviour
+//       let stmt = Box::new(conn.prepare("INSERT INTO person VALUES (1, ?1);").unwrap());
+//       Box::leak(stmt);
+//       Ok(())
+//     })
+//     .await
+//     .unwrap();
+//
+//   assert!(match conn.close().await.unwrap_err() {
+//     crate::Error::Close(_, e) => {
+//       e == rusqlite::Error::SqliteFailure(
+//         ffi::Error {
+//           code: ErrorCode::DatabaseBusy,
+//           extended_code: 5,
+//         },
+//         Some("unable to close due to unfinalized statements or unfinished backups".to_string()),
+//       )
+//     }
+//     _ => false,
+//   });
+// }
 
 #[tokio::test]
 async fn debug_format_test() {

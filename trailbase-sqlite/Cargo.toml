@@ -10,6 +10,7 @@ infer = "0.16.0"
 jsonschema = { version = "0.26.0", default-features = false }
 lazy_static = "1.5.0"
 log = "0.4.22"
+parking_lot = "0.12.3"
 rusqlite = { workspace = true }
 schemars = "0.8.21"
 serde = { version = "^1.0.203", features = ["derive"] }
