@@ -332,6 +332,19 @@ impl SelectQueryBuilder {
       )
       .await;
   }
+
+  #[inline]
+  pub(crate) fn run_sync(
+    state: &AppState,
+    table_name: &str,
+    pk_column: &str,
+    pk_value: trailbase_sqlite::Value,
+  ) -> Result<Option<trailbase_sqlite::Row>, trailbase_sqlite::Error> {
+    return state.conn().query_row_sync(
+      &format!("SELECT * FROM '{table_name}' WHERE {pk_column} = $1"),
+      [pk_value],
+    );
+  }
 }
 
 pub(crate) struct GetFileQueryBuilder;

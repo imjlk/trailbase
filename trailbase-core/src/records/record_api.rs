@@ -228,6 +228,7 @@ impl RecordApi {
   }
 
   /// Check if the given user (if any) can access a record given the request and the operation.
+  #[inline]
   pub async fn check_record_level_access(
     &self,
     p: Permission,
@@ -243,19 +244,76 @@ impl RecordApi {
         return Ok(());
       };
 
-      let (access_query, params) = self
-        .build_access_query_and_params(
-          p,
-          access_rule,
-          self.table_name(),
-          record_id,
-          request_params,
-          user,
-        )
-        .await?;
+      let (access_query, params) = self.build_access_query_and_params(
+        p,
+        access_rule,
+        self.table_name(),
+        record_id,
+        request_params,
+        user,
+      )?;
 
-      let row = match crate::util::query_one_row(&self.state.conn, &access_query, params).await {
-        Ok(row) => row,
+      let row = match self.state.conn.query_row(&access_query, params).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+          break 'acl;
+        }
+        Err(err) => {
+          error!("RLA query '{access_query}' failed: {err}");
+          break 'acl;
+        }
+      };
+
+      let allowed: bool = match row.get(0) {
+        Ok(allowed) => allowed,
+        Err(err) => {
+          if cfg!(test) {
+            panic!("RLA query returned NULL. Failing closed: '{access_query}'\n{err}");
+          } else {
+            warn!("RLA query returned NULL. Failing closed: '{access_query}'\n{err}");
+          }
+          break 'acl;
+        }
+      };
+
+      if allowed {
+        return Ok(());
+      }
+    }
+
+    return Err(RecordError::Forbidden);
+  }
+
+  #[inline]
+  pub fn check_record_level_access_sync(
+    &self,
+    p: Permission,
+    record_id: Option<&trailbase_sqlite::Value>,
+    request_params: Option<&mut LazyParams<'_>>,
+    user: Option<&User>,
+  ) -> Result<(), RecordError> {
+    // First check table level access and if present check row-level access based on access rule.
+    self.check_table_level_access(p, user)?;
+
+    'acl: {
+      let Some(ref access_rule) = self.access_rule(p) else {
+        return Ok(());
+      };
+
+      let (access_query, params) = self.build_access_query_and_params(
+        p,
+        access_rule,
+        self.table_name(),
+        record_id,
+        request_params,
+        user,
+      )?;
+
+      let row = match self.state.conn.query_row_sync(&access_query, params) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+          break 'acl;
+        }
         Err(err) => {
           error!("RLA query '{access_query}' failed: {err}");
           break 'acl;
@@ -305,7 +363,7 @@ impl RecordApi {
   // TODO: We should probably break this up into separate functions for CRUD, to only do and inject
   // what's actually needed. Maybe even break up the entire check_access_and_rls_then. It's pretty
   // winding right now.
-  async fn build_access_query_and_params(
+  fn build_access_query_and_params(
     &self,
     p: Permission,
     access_rule: &str,

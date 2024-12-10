@@ -30,17 +30,14 @@ pub async fn read_record_handler(
 
   let record_id = api.id_to_sql(&record)?;
 
-  api
-    .check_record_level_access(Permission::Read, Some(&record_id), None, user.as_ref())
-    .await?;
+  api.check_record_level_access_sync(Permission::Read, Some(&record_id), None, user.as_ref())?;
 
-  let Some(row) = SelectQueryBuilder::run(
+  let Some(row) = SelectQueryBuilder::run_sync(
     &state,
     api.table_name(),
     &api.record_pk_column().name,
     record_id,
-  )
-  .await?
+  )?
   else {
     return Err(RecordError::RecordNotFound);
   };

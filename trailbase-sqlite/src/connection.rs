@@ -382,6 +382,23 @@ impl Connection {
     });
   }
 
+  pub fn query_row_sync(
+    &self,
+    sql: &str,
+    params: impl Params + Send + 'static,
+  ) -> Result<Option<Row>> {
+    let sql = sql.to_string();
+    return self.conn.call(move |conn: &mut rusqlite::Connection| {
+      let mut stmt = conn.prepare(&sql)?;
+      params.bind(&mut stmt)?;
+      let mut rows = stmt.raw_query();
+      if let Some(row) = rows.next()? {
+        return Ok(Some(Row::from_row(row, None)?));
+      }
+      Ok(None)
+    });
+  }
+
   pub async fn query_value<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
     sql: &str,
