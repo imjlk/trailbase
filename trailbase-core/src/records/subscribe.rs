@@ -4,7 +4,7 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt};
 use parking_lot::{Mutex, RwLock};
-use rusqlite::hooks::{Action, PreUpdateCase};
+use rusqlite::hooks::Action;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{
@@ -23,7 +23,7 @@ static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 // TODO:
 //  * clients
 //  * table-wide subscriptions
-//  * opt: avoid repeated encoding of events
+//  * optimize: avoid repeated encoding of events
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
 pub enum RecordAction {
@@ -70,6 +70,7 @@ pub struct Subscription {
 struct ManagerState {
   conn: trailbase_sqlite::Connection,
 
+  // Map from table name to row id to list of subscriptions.
   subscriptions: RwLock<HashMap<String, HashMap<i64, Vec<Subscription>>>>,
   installed: Mutex<bool>,
 }
@@ -88,6 +89,16 @@ impl SubscriptionManager {
         installed: Mutex::new(false),
       }),
     });
+  }
+
+  pub fn num_subscriptions(&self) -> usize {
+    let mut count: usize = 0;
+    for table in self.state.subscriptions.read().values() {
+      for record in table.values() {
+        count += record.len();
+      }
+    }
+    return count;
   }
 
   fn remove_hook(state: &ManagerState, conn: &rusqlite::Connection) {
@@ -183,6 +194,7 @@ impl SubscriptionManager {
     // Cleanup subscriptions on delete.
     if action == RecordAction::Delete {
       let mut lock = s.subscriptions.write();
+
       if let Some(m) = lock.get_mut(table) {
         m.remove(&rowid);
 
@@ -208,19 +220,19 @@ impl SubscriptionManager {
 
     let s = state.clone();
 
-    state
-      .conn
-      .call(|conn| {
-        conn.preupdate_hook(Some(
-          |action: Action, db: &str, table: &str, value: &PreUpdateCase| {
-            // TODO: explore this as a more perfomant alternative to post-update hook with rowid and
-            // additional lookups. Security/ACL implications?
-          },
-        ));
-
-        return Ok(());
-      })
-      .await?;
+    // state
+    //   .conn
+    //   .call(|conn| {
+    //     conn.preupdate_hook(Some(
+    //       |action: Action, db: &str, table: &str, value: &PreUpdateCase| {
+    //         // TODO: explore this as a more perfomant alternative to post-update hook with rowid
+    // and         // additional lookups. Security/ACL implications?
+    //       },
+    //     ));
+    //
+    //     return Ok(());
+    //   })
+    //   .await?;
 
     return state
       .conn
@@ -396,6 +408,8 @@ mod tests {
       .await
       .unwrap();
 
+    assert_eq!(1, manager.num_subscriptions());
+
     conn
       .execute(
         "UPDATE test SET text = $1 WHERE _rowid_ = $2",
@@ -404,6 +418,11 @@ mod tests {
       .await
       .unwrap();
 
+    assert!(matches!(
+      receiver.recv().await.unwrap(),
+      DbEvent::Update(None)
+    ));
+
     conn
       .execute("DELETE FROM test WHERE _rowid_ = $2", params!(rowid))
       .await
@@ -411,9 +430,10 @@ mod tests {
 
     assert!(matches!(
       receiver.recv().await.unwrap(),
-      DbEvent::Update(None)
+      DbEvent::Delete(None)
     ));
-    // assert!(matches!(receiver.recv().await.unwrap().action));
+
+    assert_eq!(0, manager.num_subscriptions());
   }
 
   // TODO: Test actual SSE handler.
