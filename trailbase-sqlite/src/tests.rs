@@ -324,7 +324,7 @@ async fn test_hooks() {
 
   let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
   conn
-    .add_hook(move |c, action, _db, table, row_id| match action {
+    .add_preupdate_hook(move |c, action, _db, table, row_id, _values| match action {
       rusqlite::hooks::Action::SQLITE_INSERT => {
         let text = c
           .query_row(

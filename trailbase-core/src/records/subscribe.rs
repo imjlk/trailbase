@@ -13,10 +13,13 @@ use std::sync::{
 };
 use trailbase_sqlite::params;
 
-use crate::auth::user::User;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
 use crate::AppState;
+use crate::{
+  auth::user::User,
+  table_metadata::{self, TableMetadataCache},
+};
 
 static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 
@@ -69,6 +72,7 @@ pub struct Subscription {
 
 struct ManagerState {
   conn: trailbase_sqlite::Connection,
+  table_metadata: TableMetadataCache,
 
   // Map from table name to row id to list of subscriptions.
   subscriptions: RwLock<HashMap<String, HashMap<i64, Vec<Subscription>>>>,
@@ -81,10 +85,14 @@ pub struct SubscriptionManager {
 }
 
 impl SubscriptionManager {
-  pub fn new(conn: trailbase_sqlite::Connection) -> Result<Self, crate::InitError> {
+  pub fn new(
+    conn: trailbase_sqlite::Connection,
+    table_metadata: TableMetadataCache,
+  ) -> Result<Self, crate::InitError> {
     return Ok(Self {
       state: Arc::new(ManagerState {
         conn,
+        table_metadata,
         subscriptions: RwLock::new(HashMap::new()),
         installed: Mutex::new(false),
       }),
@@ -119,17 +127,26 @@ impl SubscriptionManager {
     db: &str,
     table: &str,
     rowid: i64,
+    values: Vec<rusqlite::types::Value>,
   ) {
     assert_eq!(db, "main");
 
-    match action {
-      Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => {}
+    let Some(table_metadata) = s.table_metadata.get(table) else {
+      return;
+    };
+
+    // TODO: Check ACLs against injected record rather than rowid.
+    let _record_params = values.into_iter().enumerate().map(|(idx, v)| {
+      return (&table_metadata.schema.columns[idx].name, v);
+    });
+
+    let action: RecordAction = match action {
+      Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
       a => {
         log::error!("Unknown action: {a:?}");
         return;
       }
     };
-    let action: RecordAction = action.into();
 
     let mut cleanups: Vec<usize> = vec![];
     {
@@ -220,25 +237,16 @@ impl SubscriptionManager {
 
     let s = state.clone();
 
-    // state
-    //   .conn
-    //   .call(|conn| {
-    //     conn.preupdate_hook(Some(
-    //       |action: Action, db: &str, table: &str, value: &PreUpdateCase| {
-    //         // TODO: explore this as a more perfomant alternative to post-update hook with rowid
-    // and         // additional lookups. Security/ACL implications?
-    //       },
-    //     ));
-    //
-    //     return Ok(());
-    //   })
-    //   .await?;
-
     return state
       .conn
-      .add_hook(
-        move |conn: &rusqlite::Connection, action: Action, db: &str, table: &str, rowid: i64| {
-          Self::hook(&s, conn, action, db, table, rowid);
+      .add_preupdate_hook(
+        move |conn: &rusqlite::Connection,
+              action: Action,
+              db: &str,
+              table: &str,
+              rowid: i64,
+              values| {
+          Self::hook(&s, conn, action, db, table, rowid, values);
         },
       )
       .await;
@@ -401,7 +409,7 @@ mod tests {
 
     assert_eq!(rowid, record_id_raw);
 
-    let manager = SubscriptionManager::new(conn.clone()).unwrap();
+    let manager = SubscriptionManager::new(conn.clone(), state.table_metadata().clone()).unwrap();
     let api = state.lookup_record_api("api_name").unwrap();
     let receiver = manager
       .add_subscription(api, Some(trailbase_sqlite::Value::Integer(0)), None)

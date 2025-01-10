@@ -1,5 +1,6 @@
 use crossbeam_channel::{Receiver, Sender};
-use rusqlite::hooks::Action;
+use rusqlite::hooks::{Action, PreUpdateCase};
+use rusqlite::types::Value;
 use std::{
   fmt::{self, Debug},
   sync::Arc,
@@ -35,11 +36,12 @@ macro_rules! named_params {
 pub type Result<T> = std::result::Result<T, Error>;
 
 type CallFn = Box<dyn FnOnce(&mut rusqlite::Connection) + Send + 'static>;
-type HookFn = Arc<dyn Fn(&rusqlite::Connection, Action, &str, &str, i64) + Send + Sync + 'static>;
+type HookFn =
+  Arc<dyn Fn(&rusqlite::Connection, Action, &str, &str, i64, Vec<Value>) + Send + Sync + 'static>;
 
 enum Message {
   Run(CallFn),
-  ExecuteHook(HookFn, Action, String, String, i64),
+  ExecuteHook(HookFn, Action, String, String, i64, Vec<Value>),
   Close(oneshot::Sender<std::result::Result<(), rusqlite::Error>>),
 }
 
@@ -204,23 +206,69 @@ impl Connection {
       .await;
   }
 
-  pub async fn add_hook(
+  pub async fn add_preupdate_hook(
     &self,
-    f: impl Fn(&rusqlite::Connection, Action, &str, &str, i64) + Send + Sync + 'static,
+    f: impl Fn(&rusqlite::Connection, Action, &str, &str, i64, Vec<Value>) + Send + Sync + 'static,
   ) -> Result<()> {
     let sender = self.sender.clone();
     let f = Arc::new(f);
 
     return self
       .call(|conn| {
-        conn.update_hook(Some(
-          move |action: Action, db: &str, table: &str, row: i64| {
+        conn.preupdate_hook(Some(
+          move |action: Action, db: &str, table: &str, case: &PreUpdateCase| {
+            let (row, values) = match case {
+              PreUpdateCase::Insert(accessor) => {
+                let values: Vec<_> = (0..accessor.get_column_count())
+                  .into_iter()
+                  .map(|idx| -> Value {
+                    accessor
+                      .get_new_column_value(idx)
+                      .map_or(rusqlite::types::Value::Null, |v| v.into())
+                  })
+                  .collect();
+
+                (accessor.get_new_row_id(), values)
+              }
+              PreUpdateCase::Delete(accessor) => {
+                let values: Vec<_> = (0..accessor.get_column_count())
+                  .into_iter()
+                  .map(|idx| -> rusqlite::types::Value {
+                    accessor
+                      .get_old_column_value(idx)
+                      .map_or(rusqlite::types::Value::Null, |v| v.into())
+                  })
+                  .collect();
+
+                (accessor.get_old_row_id(), values)
+              }
+              PreUpdateCase::Update {
+                new_value_accessor: accessor,
+                ..
+              } => {
+                let values: Vec<_> = (0..accessor.get_column_count())
+                  .into_iter()
+                  .map(|idx| -> rusqlite::types::Value {
+                    accessor
+                      .get_new_column_value(idx)
+                      .map_or(rusqlite::types::Value::Null, |v| v.into())
+                  })
+                  .collect();
+
+                (accessor.get_new_row_id(), values)
+              }
+              PreUpdateCase::Unknown => {
+                return;
+              }
+            };
+
             let _ = sender.send(Message::ExecuteHook(
               f.clone(),
               action,
               db.to_string(),
               table.to_string(),
               row,
+              values,
             ));
           },
         ));
@@ -286,7 +334,9 @@ fn event_loop(mut conn: rusqlite::Connection, receiver: Receiver<Message>) {
   while let Ok(message) = receiver.recv() {
     match message {
       Message::Run(f) => f(&mut conn),
-      Message::ExecuteHook(f, action, db, table, row) => f(&conn, action, &db, &table, row),
+      Message::ExecuteHook(f, action, db, table, row, values) => {
+        f(&conn, action, &db, &table, row, values)
+      }
       Message::Close(ch) => {
         match conn.close() {
           Ok(v) => ch.send(Ok(v)).expect(BUG_TEXT),
