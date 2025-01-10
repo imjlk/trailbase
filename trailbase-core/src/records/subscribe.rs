@@ -25,7 +25,10 @@ static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 // TODO:
 //  * clients
 //  * table-wide subscriptions
-//  * optimize: avoid repeated encoding of events
+//  * optimize: avoid repeated encoding of events. Easy to do but makes testing harder since there's
+//    no good way to parse sse::Event back.
+
+type SseEvent = Result<axum::response::sse::Event, axum::Error>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
 pub enum RecordAction {
@@ -229,6 +232,7 @@ impl SubscriptionManager {
       let mut lock = s.subscriptions.write();
 
       if let Some(m) = lock.get_mut(table) {
+        // Also drops the channel and thus automatically closes the SSE connection.
         m.remove(&rowid);
 
         if m.is_empty() {
@@ -348,7 +352,7 @@ pub async fn add_subscription_sse_handler(
   State(state): State<AppState>,
   Path((api_name, record)): Path<(String, String)>,
   user: Option<User>,
-) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>>, RecordError> {
+) -> Result<Sse<impl Stream<Item = SseEvent>>, RecordError> {
   let Some(api) = state.lookup_record_api(&api_name) else {
     return Err(RecordError::ApiNotFound);
   };
@@ -368,7 +372,13 @@ pub async fn add_subscription_sse_handler(
     .await?;
 
   return Ok(
-    Sse::new(receiver.map(|ev| Event::default().json_data(ev))).keep_alive(KeepAlive::default()),
+    Sse::new(receiver.map(|ev| {
+      // TODO: We're re-encoding the event over and over again for all subscriptions. Would be easy
+      // to pre-encode on the sender side but makes testing much harder, since there's no good way
+      // to parse sse::Event back.
+      return Event::default().json_data(ev);
+    }))
+    .keep_alive(KeepAlive::default()),
   );
 }
 
