@@ -14,6 +14,7 @@ use std::sync::{
 use trailbase_sqlite::params;
 
 use crate::auth::user::User;
+use crate::records::sql_to_json::value_to_json;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
 use crate::table_metadata::TableMetadataCache;
@@ -129,6 +130,14 @@ impl SubscriptionManager {
   ) {
     assert_eq!(db, "main");
 
+    let action: RecordAction = match action {
+      Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
+      a => {
+        log::error!("Unknown action: {a:?}");
+        return;
+      }
+    };
+
     let Some(table_metadata) = s.table_metadata.get(table) else {
       return;
     };
@@ -141,22 +150,27 @@ impl SubscriptionManager {
       })
       .collect();
 
-    let action: RecordAction = match action {
-      Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
-      a => {
-        log::error!("Unknown action: {a:?}");
-        return;
-      }
-    };
+    let json_value = serde_json::Value::Object(
+      record
+        .iter()
+        .filter_map(|(name, value)| {
+          let Ok(v) = value_to_json(value.clone()) else {
+            return None;
+          };
+
+          return Some(((*name).to_string(), v));
+        })
+        .collect(),
+    );
 
     let mut cleanups: Vec<usize> = vec![];
     {
       let lock = s.subscriptions.read();
       if let Some(subs) = lock.get(table).and_then(|m| m.get(&rowid)) {
         let event = match action {
-          RecordAction::Delete => DbEvent::Delete(None),
-          RecordAction::Insert => DbEvent::Insert(None),
-          RecordAction::Update => DbEvent::Update(None),
+          RecordAction::Delete => DbEvent::Delete(Some(json_value)),
+          RecordAction::Insert => DbEvent::Insert(Some(json_value)),
+          RecordAction::Update => DbEvent::Update(Some(json_value)),
         };
 
         for (idx, sub) in subs.iter().enumerate() {
@@ -172,14 +186,14 @@ impl SubscriptionManager {
             continue;
           }
 
-          if let Err(err) = sub.channel.try_send(event.clone()) {
-            match err {
-              async_channel::TrySendError::Full(ev) => {
-                log::warn!("Channel full, dropping event: {ev:?}");
-              }
-              async_channel::TrySendError::Closed(_ev) => {
-                cleanups.push(idx);
-              }
+          // TODO: Avoid cloning the event/record over and over.
+          match sub.channel.try_send(event.clone()) {
+            Ok(_) => {}
+            Err(async_channel::TrySendError::Full(ev)) => {
+              log::warn!("Channel full, dropping event: {ev:?}");
+            }
+            Err(async_channel::TrySendError::Closed(_ev)) => {
+              cleanups.push(idx);
             }
           }
         }
@@ -330,7 +344,7 @@ impl SubscriptionManager {
   // }
 }
 
-pub async fn sse_handler(
+pub async fn add_subscription_sse_handler(
   State(state): State<AppState>,
   Path((api_name, record)): Path<(String, String)>,
   user: Option<User>,
@@ -348,8 +362,10 @@ pub async fn sse_handler(
     return Err(RecordError::Forbidden);
   };
 
-  let mgr = state.subscription_manager().clone();
-  let receiver = mgr.add_subscription(api, Some(record_id), user).await?;
+  let receiver = state
+    .subscription_manager()
+    .add_subscription(api, Some(record_id), user)
+    .await?;
 
   return Ok(
     Sse::new(receiver.map(|ev| Event::default().json_data(ev))).keep_alive(KeepAlive::default()),
@@ -428,20 +444,32 @@ mod tests {
       .await
       .unwrap();
 
-    assert!(matches!(
-      receiver.recv().await.unwrap(),
-      DbEvent::Update(None)
-    ));
+    let expected = serde_json::json!({
+      "id": record_id_raw,
+      "text": "bar",
+    });
+    match receiver.recv().await.unwrap() {
+      DbEvent::Update(Some(value)) => {
+        assert_eq!(value, expected);
+      }
+      x => {
+        assert!(false, "Expected update, got: {x:?}");
+      }
+    };
 
     conn
       .execute("DELETE FROM test WHERE _rowid_ = $2", params!(rowid))
       .await
       .unwrap();
 
-    assert!(matches!(
-      receiver.recv().await.unwrap(),
-      DbEvent::Delete(None)
-    ));
+    match receiver.recv().await.unwrap() {
+      DbEvent::Delete(Some(value)) => {
+        assert_eq!(value, expected);
+      }
+      x => {
+        assert!(false, "Expected update, got: {x:?}");
+      }
+    }
 
     assert_eq!(0, manager.num_subscriptions());
   }

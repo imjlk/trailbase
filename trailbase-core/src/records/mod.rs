@@ -80,7 +80,7 @@ pub(crate) fn router() -> Router<AppState> {
     )
     .route(
       &format!("/{RECORD_API_PATH}/{{name}}/subscribe/{{record}}"),
-      get(subscribe::sse_handler),
+      get(subscribe::add_subscription_sse_handler),
     );
 }
 

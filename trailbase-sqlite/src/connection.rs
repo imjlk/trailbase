@@ -220,7 +220,6 @@ impl Connection {
             let (row, values) = match case {
               PreUpdateCase::Insert(accessor) => {
                 let values: Vec<_> = (0..accessor.get_column_count())
-                  .into_iter()
                   .map(|idx| -> Value {
                     accessor
                       .get_new_column_value(idx)
@@ -232,7 +231,6 @@ impl Connection {
               }
               PreUpdateCase::Delete(accessor) => {
                 let values: Vec<_> = (0..accessor.get_column_count())
-                  .into_iter()
                   .map(|idx| -> rusqlite::types::Value {
                     accessor
                       .get_old_column_value(idx)
@@ -247,7 +245,6 @@ impl Connection {
                 ..
               } => {
                 let values: Vec<_> = (0..accessor.get_column_count())
-                  .into_iter()
                   .map(|idx| -> rusqlite::types::Value {
                     accessor
                       .get_new_column_value(idx)
