@@ -339,11 +339,11 @@ impl RecordApi {
 
   /// Check if the given user (if any) can access a record given the request and the operation.
   #[allow(unused)]
-  pub fn check_record_level_read_access_by_rowid(
+  pub fn check_record_level_read_access(
     &self,
     conn: &rusqlite::Connection,
     p: Permission,
-    rowid: i64,
+    record: Vec<(&str, rusqlite::types::Value)>,
     user: Option<&User>,
   ) -> Result<(), RecordError> {
     // First check table level access and if present check row-level access based on access rule.
@@ -352,8 +352,8 @@ impl RecordApi {
     let Some(access_rule) = self.access_rule(p) else {
       return Ok(());
     };
-    let params = build_named_params_for_read_by_rowid(rowid, user);
-    let query = build_read_access_query_by_rowid(self.table_name(), access_rule);
+
+    let (query, params) = build_query_and_params_for_record_read(access_rule, user, record);
 
     match Self::query_access(conn, &query, params) {
       Ok(allowed) => {
@@ -453,28 +453,43 @@ impl RecordApi {
   }
 }
 
-fn build_named_params_for_read_by_rowid(rowid: i64, user: Option<&User>) -> NamedParams {
-  return vec![
-    (
-      Cow::Borrowed(":__user_id"),
-      user.map_or(Value::Null, |u| Value::Blob(u.uuid.into())),
-    ),
-    (Cow::Borrowed(":__row_id"), Value::Integer(rowid)),
-  ];
-}
+fn build_query_and_params_for_record_read(
+  access_rule: &str,
+  user: Option<&User>,
+  record: Vec<(&str, rusqlite::types::Value)>,
+) -> (String, NamedParams) {
+  let row = record
+    .iter()
+    .map(|(name, _value)| {
+      return format!(":__v_{name} AS {name}");
+    })
+    .collect::<Vec<_>>()
+    .join(", ");
 
-fn build_read_access_query_by_rowid(table_name: &str, access_rule: &str) -> String {
+  let mut params: Vec<_> = record
+    .into_iter()
+    .map(|(name, value)| {
+      return (Cow::Owned(format!(":__v_{name}")), value);
+    })
+    .collect();
+
+  params.push((
+    Cow::Borrowed(":__user_id"),
+    user.map_or(Value::Null, |u| Value::Blob(u.uuid.into())),
+  ));
+
   // Assumes access_rule is an expression: https://www.sqlite.org/syntax/expr.html
-  // let access_rule = self.access_rule(Permission::Read);
-  return indoc::formatdoc!(
+  let query = indoc::formatdoc!(
     r#"
         SELECT
           ({access_rule})
         FROM
           (SELECT :__user_id AS id) AS _USER_,
-          (SELECT * FROM "{table_name}" WHERE _rowid_ = :__row_id) AS _ROW_
+          (SELECT {row}) AS _ROW_
       "#
   );
+
+  return (query, params);
 }
 
 /// Build access query for record reads, deletes and query access.

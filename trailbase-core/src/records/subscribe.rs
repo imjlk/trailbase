@@ -13,13 +13,11 @@ use std::sync::{
 };
 use trailbase_sqlite::params;
 
+use crate::auth::user::User;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
+use crate::table_metadata::TableMetadataCache;
 use crate::AppState;
-use crate::{
-  auth::user::User,
-  table_metadata::{self, TableMetadataCache},
-};
 
 static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 
@@ -135,10 +133,13 @@ impl SubscriptionManager {
       return;
     };
 
-    // TODO: Check ACLs against injected record rather than rowid.
-    let _record_params = values.into_iter().enumerate().map(|(idx, v)| {
-      return (&table_metadata.schema.columns[idx].name, v);
-    });
+    let record: Vec<_> = values
+      .into_iter()
+      .enumerate()
+      .map(|(idx, v)| {
+        return (table_metadata.schema.columns[idx].name.as_str(), v);
+      })
+      .collect();
 
     let action: RecordAction = match action {
       Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
@@ -160,10 +161,11 @@ impl SubscriptionManager {
 
         for (idx, sub) in subs.iter().enumerate() {
           let api = &sub.api;
-          if let Err(_err) = api.check_record_level_read_access_by_rowid(
+          if let Err(_err) = api.check_record_level_read_access(
             conn,
             Permission::Read,
-            rowid,
+            // TODO: Maybe we could inject ValueRef instead to avoid repeated cloning.
+            record.clone(),
             sub.user.as_ref(),
           ) {
             let _ = sub.channel.try_send(DbEvent::Error("Access denied".into()));
