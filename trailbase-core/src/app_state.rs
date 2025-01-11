@@ -69,6 +69,22 @@ impl AppState {
     let table_metadata_clone = args.table_metadata.clone();
     let conn_clone = args.conn.clone();
 
+    let record_apis = Computed::new(&config, move |c| {
+      return c
+        .record_apis
+        .iter()
+        .filter_map(|config| {
+          match build_record_api(conn_clone.clone(), &table_metadata_clone, config.clone()) {
+            Ok(api) => Some((api.api_name().to_string(), api)),
+            Err(err) => {
+              error!("{err}");
+              None
+            }
+          }
+        })
+        .collect::<Vec<_>>();
+    });
+
     let runtime = args
       .js_runtime_threads
       .map_or_else(RuntimeHandle::new, RuntimeHandle::new_with_threads);
@@ -89,27 +105,13 @@ impl AppState {
           }
         }),
         mailer: build_mailer(&config, None),
-        record_apis: Computed::new(&config, move |c| {
-          return c
-            .record_apis
-            .iter()
-            .filter_map(|config| {
-              match build_record_api(conn_clone.clone(), &table_metadata_clone, config.clone()) {
-                Ok(api) => Some((api.api_name().to_string(), api)),
-                Err(err) => {
-                  error!("{err}");
-                  None
-                }
-              }
-            })
-            .collect::<Vec<_>>();
-        }),
+        record_apis: record_apis.clone(),
         config,
         conn: args.conn.clone(),
         logs_conn: args.logs_conn,
         jwt: args.jwt,
         table_metadata: args.table_metadata.clone(),
-        subscription_manager: SubscriptionManager::new(args.conn, args.table_metadata).unwrap(),
+        subscription_manager: SubscriptionManager::new(args.conn, args.table_metadata, record_apis),
         object_store: args.object_store,
         runtime,
         #[cfg(test)]
@@ -367,6 +369,23 @@ pub async fn test_state(options: Option<TestStateOptions>) -> anyhow::Result<App
     build_objectstore(&data_dir, None).unwrap()
   };
 
+  let record_apis = Computed::new(&config, move |c| {
+    return c
+      .record_apis
+      .iter()
+      .filter_map(|config| {
+        let api = build_record_api(
+          main_conn_clone.clone(),
+          &table_metadata_clone,
+          config.clone(),
+        )
+        .unwrap();
+
+        return Some((api.api_name().to_string(), api));
+      })
+      .collect::<Vec<_>>();
+  });
+
   let runtime = RuntimeHandle::new();
   runtime.set_connection(conn.clone());
 
@@ -379,28 +398,13 @@ pub async fn test_state(options: Option<TestStateOptions>) -> anyhow::Result<App
         ConfiguredOAuthProviders::from_config(c.auth.clone()).unwrap()
       }),
       mailer: build_mailer(&config, options.and_then(|o| o.mailer)),
-      record_apis: Computed::new(&config, move |c| {
-        return c
-          .record_apis
-          .iter()
-          .filter_map(|config| {
-            let api = build_record_api(
-              main_conn_clone.clone(),
-              &table_metadata_clone,
-              config.clone(),
-            )
-            .unwrap();
-
-            return Some((api.api_name().to_string(), api));
-          })
-          .collect::<Vec<_>>();
-      }),
+      record_apis: record_apis.clone(),
       config,
       conn: conn.clone(),
       logs_conn,
       jwt: jwt::test_jwt_helper(),
       table_metadata: table_metadata.clone(),
-      subscription_manager: SubscriptionManager::new(conn, table_metadata).unwrap(),
+      subscription_manager: SubscriptionManager::new(conn, table_metadata, record_apis),
       object_store,
       runtime,
       cleanup: vec![Box::new(temp_dir)],

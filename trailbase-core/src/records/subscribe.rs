@@ -18,6 +18,7 @@ use crate::records::sql_to_json::value_to_json;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
 use crate::table_metadata::TableMetadataCache;
+use crate::value_notifier::Computed;
 use crate::AppState;
 
 static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
@@ -26,7 +27,8 @@ static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 //  * clients
 //  * table-wide subscriptions
 //  * optimize: avoid repeated encoding of events. Easy to do but makes testing harder since there's
-//    no good way to parse sse::Event back.
+//    no good way to parse sse::Event back :/. We should probably just bite the bullet and parse,
+//    it's literally "data: <json>\n\n".
 
 type SseEvent = Result<axum::response::sse::Event, axum::Error>;
 
@@ -65,20 +67,48 @@ pub enum DbEvent {
 pub struct Subscription {
   /// Id uniquely identifying this subscription.
   subscription_id: i64,
-  record_id: Option<trailbase_sqlite::Value>,
+  /// Name of the API this subscription is subscribed to. We need to lookup the Record API on the
+  /// hot path to make sure we're getting the latest configuration.
+  record_api_name: String,
 
-  api: RecordApi,
+  /// Record id present for subscriptions to specific records.
+  // record_id: Option<trailbase_sqlite::Value>,
   user: Option<User>,
+  /// Channel for sending events to the SSE handler.
   channel: async_channel::Sender<DbEvent>,
 }
 
+/// Internal, shareable state of the cloneable SubscriptionManager.
 struct ManagerState {
+  /// SQLite connection to monitor.
   conn: trailbase_sqlite::Connection,
+  /// Table metadata for mapping column indexes to column names needed for building JSON encoded
+  /// records.
   table_metadata: TableMetadataCache,
+  /// Record API configurations.
+  record_apis: Computed<Vec<(String, RecordApi)>, crate::config::proto::Config>,
 
-  // Map from table name to row id to list of subscriptions.
+  /// Map from table name to row id to list of subscriptions.
   subscriptions: RwLock<HashMap<String, HashMap<i64, Vec<Subscription>>>>,
+
+  /// Keeps track if a hook is installed.
+  ///
+  /// Ideally we'd ask the driver but rusqlite doesn't expose
+  /// such functionality. Unfortunately, this comes at the risk that this may get out of sync if
+  /// someone installs there own preupdate hook, however that would also break subscriptions in
+  /// general.
   installed: Mutex<bool>,
+}
+
+impl ManagerState {
+  fn lookup_record_api(&self, name: &str) -> Option<RecordApi> {
+    for (record_api_name, record_api) in self.record_apis.load().iter() {
+      if record_api_name == name {
+        return Some(record_api.clone());
+      }
+    }
+    return None;
+  }
 }
 
 #[derive(Clone)]
@@ -90,15 +120,18 @@ impl SubscriptionManager {
   pub fn new(
     conn: trailbase_sqlite::Connection,
     table_metadata: TableMetadataCache,
-  ) -> Result<Self, crate::InitError> {
-    return Ok(Self {
+    record_apis: Computed<Vec<(String, RecordApi)>, crate::config::proto::Config>,
+  ) -> Self {
+    return Self {
       state: Arc::new(ManagerState {
         conn,
         table_metadata,
+        record_apis,
+
         subscriptions: RwLock::new(HashMap::new()),
         installed: Mutex::new(false),
       }),
-    });
+    };
   }
 
   pub fn num_subscriptions(&self) -> usize {
@@ -122,131 +155,133 @@ impl SubscriptionManager {
     conn.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
   }
 
+  /// Preupdate hook that runs in a continuation of the trailbase-sqlite executor.
   fn hook(
     s: &Arc<ManagerState>,
     conn: &rusqlite::Connection,
-    action: Action,
-    db: &str,
-    table: &str,
+    table_name: &str,
+    action: RecordAction,
     rowid: i64,
-    values: Vec<rusqlite::types::Value>,
+    record_values: Vec<rusqlite::types::Value>,
   ) {
-    assert_eq!(db, "main");
-
-    let action: RecordAction = match action {
-      Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
-      a => {
-        log::error!("Unknown action: {a:?}");
-        return;
-      }
-    };
-
-    let Some(table_metadata) = s.table_metadata.get(table) else {
+    let mut read_lock = s.subscriptions.upgradable_read();
+    let Some(subs) = read_lock.get(table_name).and_then(|m| m.get(&rowid)) else {
       return;
     };
 
-    let record: Vec<_> = values
+    let Some(table_metadata) = s.table_metadata.get(table_name) else {
+      // TODO: Should we cleanup here? Probably, since we won't recover from this issue.
+      log::error!("Table not found: {table_name}");
+      return;
+    };
+
+    // Join values with column names.
+    let record: Vec<_> = record_values
       .into_iter()
       .enumerate()
-      .map(|(idx, v)| {
-        return (table_metadata.schema.columns[idx].name.as_str(), v);
-      })
+      .map(|(idx, v)| (table_metadata.schema.columns[idx].name.as_str(), v))
       .collect();
 
-    let json_value = serde_json::Value::Object(
-      record
-        .iter()
-        .filter_map(|(name, value)| {
-          let Ok(v) = value_to_json(value.clone()) else {
+    // Build a JSON-encoded SQLite event (insert, update, delete).
+    let event = {
+      let json_value = serde_json::Value::Object(
+        record
+          .iter()
+          .filter_map(|(name, value)| {
+            if let Ok(v) = value_to_json(value.clone()) {
+              return Some(((*name).to_string(), v));
+            };
             return None;
-          };
+          })
+          .collect(),
+      );
 
-          return Some(((*name).to_string(), v));
-        })
-        .collect(),
-    );
+      match action {
+        RecordAction::Delete => DbEvent::Delete(Some(json_value)),
+        RecordAction::Insert => DbEvent::Insert(Some(json_value)),
+        RecordAction::Update => DbEvent::Update(Some(json_value)),
+      }
+    };
 
-    let mut cleanups: Vec<usize> = vec![];
-    {
-      let lock = s.subscriptions.read();
-      if let Some(subs) = lock.get(table).and_then(|m| m.get(&rowid)) {
-        let event = match action {
-          RecordAction::Delete => DbEvent::Delete(Some(json_value)),
-          RecordAction::Insert => DbEvent::Insert(Some(json_value)),
-          RecordAction::Update => DbEvent::Update(Some(json_value)),
-        };
+    let mut dead_subscriptions: Vec<usize> = vec![];
+    for (idx, sub) in subs.iter().enumerate() {
+      let Some(api) = s.lookup_record_api(&sub.record_api_name) else {
+        dead_subscriptions.push(idx);
+        continue;
+      };
 
-        for (idx, sub) in subs.iter().enumerate() {
-          let api = &sub.api;
-          if let Err(_err) = api.check_record_level_read_access(
-            conn,
-            Permission::Read,
-            // TODO: Maybe we could inject ValueRef instead to avoid repeated cloning.
-            record.clone(),
-            sub.user.as_ref(),
-          ) {
-            let _ = sub.channel.try_send(DbEvent::Error("Access denied".into()));
-            continue;
-          }
+      if let Err(_err) = api.check_record_level_read_access(
+        conn,
+        Permission::Read,
+        // TODO: Maybe we could inject ValueRef instead to avoid repeated cloning.
+        record.clone(),
+        sub.user.as_ref(),
+      ) {
+        // This can happen if the record api configuration has changed since originally
+        // subscribed. In this case we just send and error and cancel the subscription.
+        let _ = sub.channel.try_send(DbEvent::Error("Access denied".into()));
+        dead_subscriptions.push(idx);
+        continue;
+      }
 
-          // TODO: Avoid cloning the event/record over and over.
-          match sub.channel.try_send(event.clone()) {
-            Ok(_) => {}
-            Err(async_channel::TrySendError::Full(ev)) => {
-              log::warn!("Channel full, dropping event: {ev:?}");
-            }
-            Err(async_channel::TrySendError::Closed(_ev)) => {
-              cleanups.push(idx);
-            }
-          }
+      // TODO: Avoid cloning the event/record over and over.
+      match sub.channel.try_send(event.clone()) {
+        Ok(_) => {}
+        Err(async_channel::TrySendError::Full(ev)) => {
+          log::warn!("Channel full, dropping event: {ev:?}");
+        }
+        Err(async_channel::TrySendError::Closed(_ev)) => {
+          dead_subscriptions.push(idx);
         }
       }
     }
 
-    if !cleanups.is_empty() {
-      let mut lock = s.subscriptions.write();
-
-      if let Some(r) = lock.get_mut(table) {
-        if let Some(m) = r.get_mut(&rowid) {
-          for idx in cleanups.iter().rev() {
-            m.swap_remove(*idx);
-          }
-
-          if m.is_empty() {
-            r.remove(&rowid);
-          }
-        }
-
-        if r.is_empty() {
-          lock.remove(table);
-        }
-      }
-
-      if lock.is_empty() {
-        Self::remove_hook(s, conn);
-      }
+    if dead_subscriptions.is_empty() && action != RecordAction::Delete {
+      // No cleanup needed.
+      return;
     }
 
-    // Cleanup subscriptions on delete.
-    if action == RecordAction::Delete {
-      let mut lock = s.subscriptions.write();
+    read_lock.with_upgraded(move |subscriptions| {
+      let Some(table_subscriptions) = subscriptions.get_mut(table_name) else {
+        return;
+      };
 
-      if let Some(m) = lock.get_mut(table) {
+      if action == RecordAction::Delete {
         // Also drops the channel and thus automatically closes the SSE connection.
-        m.remove(&rowid);
+        table_subscriptions.remove(&rowid);
+
+        if table_subscriptions.is_empty() {
+          subscriptions.remove(table_name);
+          if subscriptions.is_empty() {
+            Self::remove_hook(s, conn);
+          }
+        }
+
+        return;
+      }
+
+      if let Some(m) = table_subscriptions.get_mut(&rowid) {
+        for idx in dead_subscriptions.iter().rev() {
+          m.swap_remove(*idx);
+        }
 
         if m.is_empty() {
-          lock.remove(table);
+          table_subscriptions.remove(&rowid);
+
+          if table_subscriptions.is_empty() {
+            subscriptions.remove(table_name);
+            if subscriptions.is_empty() {
+              Self::remove_hook(s, conn);
+              return;
+            }
+          }
         }
       }
-
-      if lock.is_empty() {
-        Self::remove_hook(s, conn);
-      }
-    }
+    });
   }
 
-  async fn add_hook(state: Arc<ManagerState>) -> trailbase_sqlite::connection::Result<()> {
+  async fn add_hook(&self) -> trailbase_sqlite::connection::Result<()> {
+    let state = &self.state;
     {
       let mut installed = state.installed.lock();
       if *installed {
@@ -257,16 +292,30 @@ impl SubscriptionManager {
 
     let s = state.clone();
 
+    // TODO: Optimization: if there's only table-level access restrictions, we could install a
+    // simpler hook (not even a pre-update hook). Note that `add_preupdate_hook` will internally
+    // serialize the record and schedule a continuation. We could even dispatch the brokering
+    // to a separate thread to get as much work off the SQLite thread as possible.
     return state
       .conn
       .add_preupdate_hook(
         move |conn: &rusqlite::Connection,
               action: Action,
               db: &str,
-              table: &str,
+              table_name: &str,
               rowid: i64,
-              values| {
-          Self::hook(&s, conn, action, db, table, rowid, values);
+              record_values| {
+          assert_eq!(db, "main");
+
+          let action: RecordAction = match action {
+            Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
+            a => {
+              log::error!("Unknown action: {a:?}");
+              return;
+            }
+          };
+
+          Self::hook(&s, conn, table_name, action, rowid, record_values);
         },
       )
       .await;
@@ -308,8 +357,8 @@ impl SubscriptionManager {
 
       m.entry(row_id).or_default().push(Subscription {
         subscription_id,
-        api,
-        record_id: Some(record),
+        record_api_name: api.api_name().to_string(),
+        // record_id: Some(record),
         user,
         channel: sender,
       });
@@ -317,12 +366,17 @@ impl SubscriptionManager {
 
     let installed: bool = *self.state.installed.lock();
     if !installed {
-      Self::add_hook(self.state.clone()).await.unwrap();
+      self.add_hook().await.unwrap();
     }
 
     return Ok(receiver);
   }
 
+  // TODO: Cleaning up subscriptions might be a thing, e.g. if SSE handlers had an onDisconnect
+  // handler. Right now we're handling cleanups reactively, i.e. we only remove subscriptions when
+  // sending new events and the receiving end of a handler channel became invalid. It would
+  // be better to be pro-active and remove subscriptions sooner.
+  //
   // async fn cleanup_subscription(&self, subscription_id: SubscriptionId) -> Result<(),
   // RecordError> {   let mut lock = self.state.subscriptions.write();
   //
@@ -437,7 +491,7 @@ mod tests {
 
     assert_eq!(rowid, record_id_raw);
 
-    let manager = SubscriptionManager::new(conn.clone(), state.table_metadata().clone()).unwrap();
+    let manager = state.subscription_manager();
     let api = state.lookup_record_api("api_name").unwrap();
     let receiver = manager
       .add_subscription(api, Some(trailbase_sqlite::Value::Integer(0)), None)
