@@ -1,6 +1,7 @@
 use rusqlite::ffi;
 use serde::Deserialize;
 
+use crate::connection::extract_row_id;
 use crate::{named_params, params, Connection, Error, Value, ValueType};
 use rusqlite::ErrorCode;
 
@@ -322,22 +323,45 @@ async fn test_hooks() {
     .await
     .unwrap();
 
+  struct State {
+    action: rusqlite::hooks::Action,
+    table_name: String,
+    row_id: i64,
+  }
+
   let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
   conn
-    .add_preupdate_hook(move |c, action, _db, table, row_id, _values| match action {
-      rusqlite::hooks::Action::SQLITE_INSERT => {
-        let text = c
-          .query_row(
-            &format!(r#"SELECT text FROM "{table}" WHERE _rowid_ = $1"#),
-            [row_id],
-            |row| row.get::<_, String>(0),
-          )
-          .unwrap();
+    .add_preupdate_hook(
+      move |action, _db, table_name, case| {
+        let row_id = extract_row_id(case).unwrap();
+        return Some(State {
+          action,
+          table_name: table_name.to_string(),
+          row_id,
+        });
+      },
+      Some(move |c: &rusqlite::Connection, state: State| {
+        match state.action {
+          rusqlite::hooks::Action::SQLITE_INSERT => {
+            let text = c
+              .query_row(
+                &format!(
+                  r#"SELECT text FROM "{}" WHERE _rowid_ = $1"#,
+                  state.table_name
+                ),
+                [state.row_id],
+                |row| row.get::<_, String>(0),
+              )
+              .unwrap();
 
-        sender.send(text).unwrap();
-      }
-      _ => {}
-    })
+            sender.send(text).unwrap();
+          }
+          _ => {
+            panic!("unexpected action: {:?}", state.action);
+          }
+        };
+      }),
+    )
     .await
     .unwrap();
 

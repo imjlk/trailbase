@@ -4,20 +4,23 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt};
 use parking_lot::{Mutex, RwLock};
-use rusqlite::hooks::Action;
+use rusqlite::hooks::{Action, PreUpdateCase};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{
   atomic::{AtomicI64, Ordering},
   Arc,
 };
-use trailbase_sqlite::params;
+use trailbase_sqlite::{
+  connection::{extract_record_values, extract_row_id},
+  params,
+};
 
 use crate::auth::user::User;
 use crate::records::sql_to_json::value_to_json;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
-use crate::table_metadata::TableMetadataCache;
+use crate::table_metadata::{TableMetadata, TableMetadataCache};
 use crate::value_notifier::Computed;
 use crate::AppState;
 
@@ -116,6 +119,14 @@ pub struct SubscriptionManager {
   state: Arc<ManagerState>,
 }
 
+struct ContinuationState {
+  table_metadata: Arc<TableMetadata>,
+  action: RecordAction,
+  table_name: String,
+  rowid: i64,
+  record_values: Vec<rusqlite::types::Value>,
+}
+
 impl SubscriptionManager {
   pub fn new(
     conn: trailbase_sqlite::Connection,
@@ -152,26 +163,21 @@ impl SubscriptionManager {
 
     *installed = false;
 
-    conn.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    conn.preupdate_hook(None::<fn(rusqlite::hooks::Action, &str, &str, &PreUpdateCase)>);
   }
 
   /// Preupdate hook that runs in a continuation of the trailbase-sqlite executor.
-  fn hook(
-    s: &Arc<ManagerState>,
-    conn: &rusqlite::Connection,
-    table_name: &str,
-    action: RecordAction,
-    rowid: i64,
-    record_values: Vec<rusqlite::types::Value>,
-  ) {
-    let mut read_lock = s.subscriptions.upgradable_read();
-    let Some(subs) = read_lock.get(table_name).and_then(|m| m.get(&rowid)) else {
-      return;
-    };
+  fn hook_continuation(s: &ManagerState, conn: &rusqlite::Connection, state: ContinuationState) {
+    let ContinuationState {
+      table_metadata,
+      table_name,
+      action,
+      rowid,
+      record_values,
+    } = state;
 
-    let Some(table_metadata) = s.table_metadata.get(table_name) else {
-      // TODO: Should we cleanup here? Probably, since we won't recover from this issue.
-      log::error!("Table not found: {table_name}");
+    let mut read_lock = s.subscriptions.upgradable_read();
+    let Some(subs) = read_lock.get(&table_name).and_then(|m| m.get(&rowid)) else {
       return;
     };
 
@@ -242,7 +248,7 @@ impl SubscriptionManager {
     }
 
     read_lock.with_upgraded(move |subscriptions| {
-      let Some(table_subscriptions) = subscriptions.get_mut(table_name) else {
+      let Some(table_subscriptions) = subscriptions.get_mut(&table_name) else {
         return;
       };
 
@@ -251,7 +257,7 @@ impl SubscriptionManager {
         table_subscriptions.remove(&rowid);
 
         if table_subscriptions.is_empty() {
-          subscriptions.remove(table_name);
+          subscriptions.remove(&table_name);
           if subscriptions.is_empty() {
             Self::remove_hook(s, conn);
           }
@@ -269,7 +275,7 @@ impl SubscriptionManager {
           table_subscriptions.remove(&rowid);
 
           if table_subscriptions.is_empty() {
-            subscriptions.remove(table_name);
+            subscriptions.remove(&table_name);
             if subscriptions.is_empty() {
               Self::remove_hook(s, conn);
               return;
@@ -290,33 +296,62 @@ impl SubscriptionManager {
       *installed = true;
     }
 
-    let s = state.clone();
+    let s0 = state.clone();
+    let s1 = state.clone();
 
-    // TODO: Optimization: if there's only table-level access restrictions, we could install a
-    // simpler hook (not even a pre-update hook). Note that `add_preupdate_hook` will internally
-    // serialize the record and schedule a continuation. We could even dispatch the brokering
-    // to a separate thread to get as much work off the SQLite thread as possible.
+    // TODO: Optimization: in cases where there's only table-level access restrictions, we could
+    // avoid the continuation and even dispatch the subscription handling to a different thread
+    // entirely to take more work off the SQLite thread.
     return state
       .conn
       .add_preupdate_hook(
-        move |conn: &rusqlite::Connection,
-              action: Action,
-              db: &str,
-              table_name: &str,
-              rowid: i64,
-              record_values| {
+        move |action: Action, db: &str, table_name: &str, case: &PreUpdateCase| {
           assert_eq!(db, "main");
 
           let action: RecordAction = match action {
             Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
             a => {
               log::error!("Unknown action: {a:?}");
-              return;
+              return None;
             }
           };
 
-          Self::hook(&s, conn, table_name, action, rowid, record_values);
+          let Some(rowid) = extract_row_id(case) else {
+            log::error!("Failed to extract row id");
+            return None;
+          };
+
+          // If there are no subscriptions, do nothing.
+          let _ = s0
+            .subscriptions
+            .read()
+            .get(table_name)
+            .and_then(|m| m.get(&rowid))?;
+
+          let Some(table_metadata) = s0.table_metadata.get(table_name) else {
+            // TODO: Should we cleanup here? Probably, since we won't recover from this issue.
+            log::error!("Table not found: {table_name}");
+            return None;
+          };
+
+          let Some(record_values) = extract_record_values(case) else {
+            log::error!("Failed to extract values");
+            return None;
+          };
+
+          return Some(ContinuationState {
+            table_metadata,
+            action,
+            table_name: table_name.to_string(),
+            rowid,
+            record_values,
+          });
         },
+        Some(
+          move |conn: &rusqlite::Connection, state: ContinuationState| {
+            Self::hook_continuation(&s1, conn, state);
+          },
+        ),
       )
       .await;
   }
@@ -395,7 +430,7 @@ impl SubscriptionManager {
   //   }
   //
   //   if lock.is_empty() {
-  //     Self::remove_hook(&*self.state).await?;
+  //     Self::remove_preupdate_hook(&*self.state).await?;
   //   }
   //
   //   return Ok(());
