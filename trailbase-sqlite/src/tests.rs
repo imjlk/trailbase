@@ -1,4 +1,5 @@
 use rusqlite::ffi;
+use rusqlite::hooks::PreUpdateCase;
 use serde::Deserialize;
 
 use crate::connection::extract_row_id;
@@ -330,38 +331,42 @@ async fn test_hooks() {
   }
 
   let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+  let c = conn.clone();
+
   conn
-    .add_preupdate_hook(
-      move |action, _db, table_name, case| {
+    .add_preupdate_hook(Some(
+      move |action: rusqlite::hooks::Action, _db: &str, table_name: &str, case: &PreUpdateCase| {
         let row_id = extract_row_id(case).unwrap();
-        return Some(State {
+        let state = State {
           action,
           table_name: table_name.to_string(),
           row_id,
+        };
+
+        let sender = sender.clone();
+        c.call_and_forget(move |conn| {
+          match state.action {
+            rusqlite::hooks::Action::SQLITE_INSERT => {
+              let text = conn
+                .query_row(
+                  &format!(
+                    r#"SELECT text FROM "{}" WHERE _rowid_ = $1"#,
+                    state.table_name
+                  ),
+                  [state.row_id],
+                  |row| row.get::<_, String>(0),
+                )
+                .unwrap();
+
+              sender.send(text).unwrap();
+            }
+            _ => {
+              panic!("unexpected action: {:?}", state.action);
+            }
+          };
         });
       },
-      Some(move |c: &rusqlite::Connection, state: State| {
-        match state.action {
-          rusqlite::hooks::Action::SQLITE_INSERT => {
-            let text = c
-              .query_row(
-                &format!(
-                  r#"SELECT text FROM "{}" WHERE _rowid_ = $1"#,
-                  state.table_name
-                ),
-                [state.row_id],
-                |row| row.get::<_, String>(0),
-              )
-              .unwrap();
-
-            sender.send(text).unwrap();
-          }
-          _ => {
-            panic!("unexpected action: {:?}", state.action);
-          }
-        };
-      }),
-    )
+    ))
     .await
     .unwrap();
 

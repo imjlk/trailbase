@@ -72,7 +72,7 @@ impl Connection {
   /// Will return `Err` if the database connection has been closed.
   pub async fn call<F, R>(&self, function: F) -> Result<R>
   where
-    F: FnOnce(&mut rusqlite::Connection) -> Result<R> + 'static + Send,
+    F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
     R: Send + 'static,
   {
     let (sender, receiver) = oneshot::channel::<Result<R>>();
@@ -86,6 +86,12 @@ impl Connection {
       .map_err(|_| Error::ConnectionClosed)?;
 
     receiver.await.map_err(|_| Error::ConnectionClosed)?
+  }
+
+  pub fn call_and_forget(&self, function: impl FnOnce(&rusqlite::Connection) + Send + 'static) {
+    let _ = self
+      .sender
+      .send(Message::Run(Box::new(move |conn| function(conn))));
   }
 
   /// Query SQL statement.
@@ -203,62 +209,12 @@ impl Connection {
       .await;
   }
 
-  /// Adds a new pre-update hook.
-  ///
-  /// NOTE: The way we ended up implementing the &Connection access, we might as well remove the
-  /// continuation function in the future and leave it to the hook to capture `Connection` and call
-  /// `Connection::call` itself.
-  pub async fn add_preupdate_hook<T>(
+  /// Convenience API for (un)setting a new pre-update hook.
+  pub async fn add_preupdate_hook(
     &self,
-    hook: impl (Fn(Action, &str, &str, &PreUpdateCase) -> Option<T>) + Send + Sync + 'static,
-    continuation: Option<impl Fn(&rusqlite::Connection, T) + Send + Sync + 'static>,
-  ) -> Result<()>
-  where
-    T: Send + 'static,
-  {
-    let hook = Arc::new(hook);
-    return match continuation {
-      Some(c) => {
-        let sender = self.sender.clone();
-        let c = Arc::new(c);
-
-        self
-          .call(|conn| {
-            conn.preupdate_hook(Some(
-              move |action: Action, db: &str, table: &str, case: &PreUpdateCase| {
-                if let Some(v) = (*hook)(action, db, table, case) {
-                  let c = c.clone();
-                  let _ = sender.send(Message::Run(Box::new(move |conn| (*c)(conn, v))));
-                }
-              },
-            ));
-            return Ok(());
-          })
-          .await
-      }
-      None => {
-        self
-          .call(|conn| {
-            conn.preupdate_hook(Some(
-              move |action: Action, db: &str, table: &str, case: &PreUpdateCase| {
-                (*hook)(action, db, table, case);
-              },
-            ));
-            return Ok(());
-          })
-          .await
-      }
-    };
-  }
-
-  /// Remove any installed pre-update hook for this connection.
-  pub async fn remove_preupdate_hook(&self) -> Result<()> {
-    return self
-      .call(|conn| {
-        conn.preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>);
-        return Ok(());
-      })
-      .await;
+    hook: Option<impl (Fn(Action, &str, &str, &PreUpdateCase)) + Send + Sync + 'static>,
+  ) -> Result<()> {
+    return self.call(|conn| Ok(conn.preupdate_hook(hook))).await;
   }
 
   /// Close the database connection.

@@ -3,7 +3,7 @@ use axum::{
   response::sse::{Event, KeepAlive, Sse},
 };
 use futures::stream::{Stream, StreamExt};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -93,14 +93,6 @@ struct ManagerState {
 
   /// Map from table name to row id to list of subscriptions.
   subscriptions: RwLock<HashMap<String, HashMap<i64, Vec<Subscription>>>>,
-
-  /// Keeps track if a hook is installed.
-  ///
-  /// Ideally we'd ask the driver but rusqlite doesn't expose
-  /// such functionality. Unfortunately, this comes at the risk that this may get out of sync if
-  /// someone installs there own preupdate hook, however that would also break subscriptions in
-  /// general.
-  installed: Mutex<bool>,
 }
 
 impl ManagerState {
@@ -120,6 +112,7 @@ pub struct SubscriptionManager {
 }
 
 struct ContinuationState {
+  state: Arc<ManagerState>,
   table_metadata: Arc<TableMetadata>,
   action: RecordAction,
   table_name: String,
@@ -140,7 +133,6 @@ impl SubscriptionManager {
         record_apis,
 
         subscriptions: RwLock::new(HashMap::new()),
-        installed: Mutex::new(false),
       }),
     };
   }
@@ -155,26 +147,18 @@ impl SubscriptionManager {
     return count;
   }
 
-  fn remove_hook(state: &ManagerState, conn: &rusqlite::Connection) {
-    let mut installed = state.installed.lock();
-    if !*installed {
-      return;
-    }
-
-    *installed = false;
-
-    conn.preupdate_hook(None::<fn(rusqlite::hooks::Action, &str, &str, &PreUpdateCase)>);
-  }
-
   /// Preupdate hook that runs in a continuation of the trailbase-sqlite executor.
-  fn hook_continuation(s: &ManagerState, conn: &rusqlite::Connection, state: ContinuationState) {
+  fn hook_continuation(conn: &rusqlite::Connection, state: ContinuationState) {
     let ContinuationState {
+      state,
       table_metadata,
       table_name,
       action,
       rowid,
       record_values,
     } = state;
+
+    let s = &state;
 
     let mut read_lock = s.subscriptions.upgradable_read();
     let Some(subs) = read_lock.get(&table_name).and_then(|m| m.get(&rowid)) else {
@@ -259,7 +243,7 @@ impl SubscriptionManager {
         if table_subscriptions.is_empty() {
           subscriptions.remove(&table_name);
           if subscriptions.is_empty() {
-            Self::remove_hook(s, conn);
+            conn.preupdate_hook(NO_HOOK);
           }
         }
 
@@ -277,8 +261,7 @@ impl SubscriptionManager {
           if table_subscriptions.is_empty() {
             subscriptions.remove(&table_name);
             if subscriptions.is_empty() {
-              Self::remove_hook(s, conn);
-              return;
+              conn.preupdate_hook(NO_HOOK);
             }
           }
         }
@@ -288,23 +271,12 @@ impl SubscriptionManager {
 
   async fn add_hook(&self) -> trailbase_sqlite::connection::Result<()> {
     let state = &self.state;
-    {
-      let mut installed = state.installed.lock();
-      if *installed {
-        return Ok(());
-      }
-      *installed = true;
-    }
+    let conn = state.conn.clone();
+    let s = state.clone();
 
-    let s0 = state.clone();
-    let s1 = state.clone();
-
-    // TODO: Optimization: in cases where there's only table-level access restrictions, we could
-    // avoid the continuation and even dispatch the subscription handling to a different thread
-    // entirely to take more work off the SQLite thread.
     return state
       .conn
-      .add_preupdate_hook(
+      .add_preupdate_hook(Some(
         move |action: Action, db: &str, table_name: &str, case: &PreUpdateCase| {
           assert_eq!(db, "main");
 
@@ -312,47 +284,54 @@ impl SubscriptionManager {
             Action::SQLITE_UPDATE | Action::SQLITE_INSERT | Action::SQLITE_DELETE => action.into(),
             a => {
               log::error!("Unknown action: {a:?}");
-              return None;
+              return;
             }
           };
 
           let Some(rowid) = extract_row_id(case) else {
             log::error!("Failed to extract row id");
-            return None;
+            return;
           };
 
           // If there are no subscriptions, do nothing.
-          let _ = s0
+          if s
             .subscriptions
             .read()
             .get(table_name)
-            .and_then(|m| m.get(&rowid))?;
+            .and_then(|m| m.get(&rowid))
+            .is_none()
+          {
+            return;
+          }
 
-          let Some(table_metadata) = s0.table_metadata.get(table_name) else {
+          let Some(table_metadata) = s.table_metadata.get(table_name) else {
             // TODO: Should we cleanup here? Probably, since we won't recover from this issue.
             log::error!("Table not found: {table_name}");
-            return None;
+            return;
           };
 
           let Some(record_values) = extract_record_values(case) else {
             log::error!("Failed to extract values");
-            return None;
+            return;
           };
 
-          return Some(ContinuationState {
+          let state = ContinuationState {
+            state: s.clone(),
             table_metadata,
             action,
             table_name: table_name.to_string(),
             rowid,
             record_values,
+          };
+
+          // TODO: Optimization: in cases where there's only table-level access restrictions, we
+          // could avoid the continuation and even dispatch the subscription handling to a
+          // different thread entirely to take more work off the SQLite thread.
+          conn.call_and_forget(move |conn| {
+            Self::hook_continuation(conn, state);
           });
         },
-        Some(
-          move |conn: &rusqlite::Connection, state: ContinuationState| {
-            Self::hook_continuation(&s1, conn, state);
-          },
-        ),
-      )
+      ))
       .await;
   }
 
@@ -386,8 +365,9 @@ impl SubscriptionManager {
       .map_err(|err| RecordError::Internal(err.into()))?;
 
     let subscription_id = SUBSCRIPTION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    {
+    let empty = {
       let mut lock = self.state.subscriptions.write();
+      let empty = lock.is_empty();
       let m: &mut HashMap<i64, Vec<Subscription>> = lock.entry(table_name.to_string()).or_default();
 
       m.entry(row_id).or_default().push(Subscription {
@@ -397,10 +377,11 @@ impl SubscriptionManager {
         user,
         channel: sender,
       });
-    }
 
-    let installed: bool = *self.state.installed.lock();
-    if !installed {
+      empty
+    };
+
+    if empty {
       self.add_hook().await.unwrap();
     }
 
@@ -575,3 +556,5 @@ mod tests {
 
   // TODO: Test actual SSE handler.
 }
+
+const NO_HOOK: Option<fn(Action, &str, &str, &PreUpdateCase)> = None;
