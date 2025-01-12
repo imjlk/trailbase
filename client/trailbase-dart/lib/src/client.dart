@@ -290,6 +290,22 @@ class RecordApi {
     });
   }
 
+  Future<Stream<Map<String, dynamic>>> subscribeAll() async {
+    final resp = await _client.fetch(
+      '${RecordApi._recordApi}/${_name}/subscribe/*',
+      responseType: dio.ResponseType.stream,
+    );
+
+    final Stream<Uint8List> stream = resp.data.stream;
+    return stream.asyncMap((Uint8List bytes) {
+      final decoded = utf8.decode(bytes);
+      if (decoded.startsWith('data: ')) {
+        return jsonDecode(decoded.substring(6));
+      }
+      return jsonDecode(decoded);
+    });
+  }
+
   Uri imageUri(RecordId id, String colName, {int? index}) {
     if (index != null) {
       return Uri.parse(

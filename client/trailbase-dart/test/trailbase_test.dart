@@ -177,6 +177,8 @@ Future<void> main() async {
       final client = await connect();
       final api = client.records('simple_strict_table');
 
+      final tableEvents = await api.subscribeAll();
+
       final int now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final id = await api
           .create({'text_not_null': 'dart client realtime test 0: =?&${now}'});
@@ -193,6 +195,13 @@ Future<void> main() async {
         sink.close();
       }).toList();
       expect(eventList.length, equals(2));
+
+      final tableEventList =
+          await tableEvents.timeout(Duration(seconds: 10), onTimeout: (sink) {
+        print('Stream timeout');
+        sink.close();
+      }).toList();
+      expect(tableEventList.length, equals(3));
     });
   });
 }
