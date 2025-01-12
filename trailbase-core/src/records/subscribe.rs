@@ -109,7 +109,7 @@ pub struct SubscriptionManager {
 
 struct ContinuationState {
   state: Arc<ManagerState>,
-  table_metadata: Arc<TableMetadata>,
+  table_metadata: Option<Arc<TableMetadata>>,
   action: RecordAction,
   table_name: String,
   rowid: i64,
@@ -187,7 +187,7 @@ impl SubscriptionManager {
     return dead_subscriptions;
   }
 
-  /// Preupdate hook that runs in a continuation of the trailbase-sqlite executor.
+  /// Continuation of the preupdate hook being scheduled on the executor.
   fn hook_continuation(conn: &rusqlite::Connection, state: ContinuationState) {
     let ContinuationState {
       state,
@@ -199,6 +199,25 @@ impl SubscriptionManager {
     } = state;
     let s = &state;
     let table_name = table_name.as_str();
+
+    // If table_metadata is missing, the config/schema must have changed, thus removing the
+    // subscriptions.
+    let Some(table_metadata) = table_metadata else {
+      log::warn!("Table not found: {table_name}. Removing subscriptions");
+
+      let mut record_subs = s.record_subscriptions.write();
+      record_subs.remove(table_name);
+
+      let mut table_subs = s.table_subscriptions.write();
+      table_subs.remove(table_name);
+
+      if record_subs.is_empty() && table_subs.is_empty() {
+        conn.preupdate_hook(NO_HOOK);
+      }
+
+      return;
+    };
+
     // Join values with column names.
     let record: Vec<_> = record_values
       .into_iter()
@@ -343,12 +362,6 @@ impl SubscriptionManager {
             return;
           }
 
-          let Some(table_metadata) = s.table_metadata.get(table_name) else {
-            // TODO: Should we cleanup here? Probably, since we won't recover from this issue.
-            log::error!("Table not found: {table_name}");
-            return;
-          };
-
           let Some(record_values) = extract_record_values(case) else {
             log::error!("Failed to extract values");
             return;
@@ -356,7 +369,7 @@ impl SubscriptionManager {
 
           let state = ContinuationState {
             state: s.clone(),
-            table_metadata,
+            table_metadata: s.table_metadata.get(table_name),
             action,
             table_name: table_name.to_string(),
             rowid,
@@ -687,32 +700,32 @@ mod tests {
       }
     };
 
-    // let expected = serde_json::json!({
-    //   "id": record_id_raw,
-    //   "text": "bar",
-    // });
-    // match receiver.recv().await.unwrap() {
-    //   DbEvent::Update(Some(value)) => {
-    //     assert_eq!(value, expected);
-    //   }
-    //   x => {
-    //     assert!(false, "Expected update, got: {x:?}");
-    //   }
-    // };
-    //
-    // conn
-    //   .execute("DELETE FROM test WHERE id = $1", params!(record_id_raw))
-    //   .await
-    //   .unwrap();
-    //
-    // match receiver.recv().await.unwrap() {
-    //   DbEvent::Delete(Some(value)) => {
-    //     assert_eq!(value, expected);
-    //   }
-    //   x => {
-    //     assert!(false, "Expected update, got: {x:?}");
-    //   }
-    // }
+    let expected = serde_json::json!({
+      "id": record_id_raw,
+      "text": "bar",
+    });
+    match receiver.recv().await.unwrap() {
+      DbEvent::Update(Some(value)) => {
+        assert_eq!(value, expected);
+      }
+      x => {
+        assert!(false, "Expected update, got: {x:?}");
+      }
+    };
+
+    conn
+      .execute("DELETE FROM test WHERE id = $1", params!(record_id_raw))
+      .await
+      .unwrap();
+
+    match receiver.recv().await.unwrap() {
+      DbEvent::Delete(Some(value)) => {
+        assert_eq!(value, expected);
+      }
+      x => {
+        assert!(false, "Expected update, got: {x:?}");
+      }
+    }
   }
 
   // TODO: Test actual SSE handler.
