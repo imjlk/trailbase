@@ -25,9 +25,6 @@ static SUBSCRIPTION_COUNTER: AtomicI64 = AtomicI64::new(0);
 
 // TODO:
 //  * clients
-//  * optimize: avoid repeated encoding of events. Easy to do but makes testing harder since there's
-//    no good way to parse sse::Event back :/. We should probably just bite the bullet and parse,
-//    it's literally "data: <json>\n\n".
 
 type SseEvent = Result<axum::response::sse::Event, axum::Error>;
 
@@ -68,7 +65,7 @@ pub struct Subscription {
   // record_id: Option<trailbase_sqlite::Value>,
   user: Option<User>,
   /// Channel for sending events to the SSE handler.
-  channel: async_channel::Sender<DbEvent>,
+  channel: async_channel::Sender<Event>,
 }
 
 /// Internal, shareable state of the cloneable SubscriptionManager.
@@ -146,7 +143,7 @@ impl SubscriptionManager {
     conn: &rusqlite::Connection,
     subs: &[Subscription],
     record: &[(&str, rusqlite::types::ValueRef<'_>)],
-    event: &DbEvent,
+    event: &Event,
   ) -> Vec<usize> {
     let mut dead_subscriptions: Vec<usize> = vec![];
     for (idx, sub) in subs.iter().enumerate() {
@@ -160,12 +157,13 @@ impl SubscriptionManager {
       {
         // This can happen if the record api configuration has changed since originally
         // subscribed. In this case we just send and error and cancel the subscription.
-        let _ = sub.channel.try_send(DbEvent::Error("Access denied".into()));
+        if let Ok(ev) = Event::default().json_data(DbEvent::Error("Access denied".into())) {
+          let _ = sub.channel.try_send(ev);
+        }
         dead_subscriptions.push(idx);
         continue;
       }
 
-      // TODO: Avoid cloning the event/record over and over.
       match sub.channel.try_send(event.clone()) {
         Ok(_) => {}
         Err(async_channel::TrySendError::Full(ev)) => {
@@ -232,11 +230,17 @@ impl SubscriptionManager {
           .collect(),
       );
 
-      match action {
+      let db_event = match action {
         RecordAction::Delete => DbEvent::Delete(Some(json_value)),
         RecordAction::Insert => DbEvent::Insert(Some(json_value)),
         RecordAction::Update => DbEvent::Update(Some(json_value)),
-      }
+      };
+
+      let Ok(event) = Event::default().json_data(db_event) else {
+        return;
+      };
+
+      event
     };
 
     'record_subs: {
@@ -387,9 +391,7 @@ impl SubscriptionManager {
     api: RecordApi,
     record: trailbase_sqlite::Value,
     user: Option<User>,
-  ) -> Result<async_channel::Receiver<DbEvent>, RecordError> {
-    let (sender, receiver) = async_channel::bounded::<DbEvent>(16);
-
+  ) -> Result<async_channel::Receiver<Event>, RecordError> {
     let table_name = api.table_name();
     let pk_column = &api.record_pk_column().name;
 
@@ -408,6 +410,7 @@ impl SubscriptionManager {
       .get(0)
       .map_err(|err| RecordError::Internal(err.into()))?;
 
+    let (sender, receiver) = async_channel::bounded::<Event>(16);
     let subscription_id = SUBSCRIPTION_COUNTER.fetch_add(1, Ordering::SeqCst);
     let empty = {
       let mut lock = self.state.record_subscriptions.write();
@@ -436,11 +439,10 @@ impl SubscriptionManager {
     &self,
     api: RecordApi,
     user: Option<User>,
-  ) -> Result<async_channel::Receiver<DbEvent>, RecordError> {
-    let (sender, receiver) = async_channel::bounded::<DbEvent>(16);
-
+  ) -> Result<async_channel::Receiver<Event>, RecordError> {
     let table_name = api.table_name();
 
+    let (sender, receiver) = async_channel::bounded::<Event>(16);
     let subscription_id = SUBSCRIPTION_COUNTER.fetch_add(1, Ordering::SeqCst);
     let empty = {
       let mut lock = self.state.table_subscriptions.write();
@@ -503,11 +505,8 @@ pub async fn add_subscription_sse_handler(
     return Err(RecordError::ApiNotFound);
   };
 
-  fn encode(ev: DbEvent) -> Result<Event, axum::Error> {
-    // TODO: We're re-encoding the event over and over again for all subscriptions. Would be easy
-    // to pre-encode on the sender side but makes testing much harder, since there's no good way
-    // to parse sse::Event back.
-    return Event::default().json_data(ev);
+  fn encode(ev: Event) -> Result<Event, axum::Error> {
+    return Ok(ev);
   }
 
   if record == "*" {
@@ -567,6 +566,11 @@ mod tests {
   use crate::app_state::test_state;
   use crate::records::{add_record_api, AccessRules, Acls, PermissionFlag};
 
+  async fn decode_db_event(event: Event) -> DbEvent {
+    let json = decode_sse_json_event(event).await;
+    return serde_json::from_value(json).unwrap();
+  }
+
   #[tokio::test]
   async fn sse_event_encoding_test() {
     let json = serde_json::json!({
@@ -576,10 +580,7 @@ mod tests {
     let db_event = DbEvent::Delete(Some(json));
     let event = Event::default().json_data(db_event.clone()).unwrap();
 
-    let json = decode_sse_json_event(event).await;
-    let out: DbEvent = serde_json::from_value(json).unwrap();
-
-    assert_eq!(out, db_event);
+    assert_eq!(decode_db_event(event).await, db_event);
   }
 
   #[tokio::test]
@@ -647,7 +648,7 @@ mod tests {
       "id": record_id_raw,
       "text": "bar",
     });
-    match receiver.recv().await.unwrap() {
+    match decode_db_event(receiver.recv().await.unwrap()).await {
       DbEvent::Update(Some(value)) => {
         assert_eq!(value, expected);
       }
@@ -661,7 +662,7 @@ mod tests {
       .await
       .unwrap();
 
-    match receiver.recv().await.unwrap() {
+    match decode_db_event(receiver.recv().await.unwrap()).await {
       DbEvent::Delete(Some(value)) => {
         assert_eq!(value, expected);
       }
@@ -727,7 +728,7 @@ mod tests {
       "id": record_id_raw,
       "text": "foo",
     });
-    match receiver.recv().await.unwrap() {
+    match decode_db_event(receiver.recv().await.unwrap()).await {
       DbEvent::Insert(Some(value)) => {
         assert_eq!(value, expected);
       }
@@ -740,7 +741,7 @@ mod tests {
       "id": record_id_raw,
       "text": "bar",
     });
-    match receiver.recv().await.unwrap() {
+    match decode_db_event(receiver.recv().await.unwrap()).await {
       DbEvent::Update(Some(value)) => {
         assert_eq!(value, expected);
       }
@@ -754,7 +755,7 @@ mod tests {
       .await
       .unwrap();
 
-    match receiver.recv().await.unwrap() {
+    match decode_db_event(receiver.recv().await.unwrap()).await {
       DbEvent::Delete(Some(value)) => {
         assert_eq!(value, expected);
       }
