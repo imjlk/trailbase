@@ -5,7 +5,7 @@ use axum::{
 use futures::stream::{Stream, StreamExt};
 use parking_lot::RwLock;
 use rusqlite::hooks::{Action, PreUpdateCase};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
   atomic::{AtomicI64, Ordering},
@@ -52,7 +52,7 @@ impl From<Action> for RecordAction {
   }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DbEvent {
   Update(Option<serde_json::Value>),
   Insert(Option<serde_json::Value>),
@@ -318,6 +318,8 @@ impl SubscriptionManager {
         }
 
         if table_subscriptions.is_empty() {
+          subscriptions.remove(table_name);
+
           if subscriptions.is_empty() && s.record_subscriptions.read().is_empty() {
             conn.preupdate_hook(NO_HOOK);
           }
@@ -540,11 +542,50 @@ pub async fn add_subscription_sse_handler(
 }
 
 #[cfg(test)]
+async fn decode_sse_json_event(event: Event) -> serde_json::Value {
+  use axum::response::IntoResponse;
+
+  let (sender, receiver) = async_channel::unbounded::<Event>();
+  let sse = Sse::new(receiver.map(|ev| -> Result<Event, axum::Error> { Ok(ev) }));
+
+  sender.send(event).await.unwrap();
+  sender.close();
+
+  let resp = sse.into_response();
+  let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    .await
+    .unwrap();
+
+  let str = String::from_utf8_lossy(&bytes);
+  let x = str
+    .strip_prefix("data: ")
+    .unwrap()
+    .strip_suffix("\n\n")
+    .unwrap();
+  return serde_json::from_str(x).unwrap();
+}
+
+#[cfg(test)]
 mod tests {
   use super::DbEvent;
   use super::*;
   use crate::app_state::test_state;
   use crate::records::{add_record_api, AccessRules, Acls, PermissionFlag};
+
+  #[tokio::test]
+  async fn sse_event_encoding_test() {
+    let json = serde_json::json!({
+      "a": 5,
+      "b": "text",
+    });
+    let db_event = DbEvent::Delete(Some(json));
+    let event = Event::default().json_data(db_event.clone()).unwrap();
+
+    let json = decode_sse_json_event(event).await;
+    let out: DbEvent = serde_json::from_value(json).unwrap();
+
+    assert_eq!(out, db_event);
+  }
 
   #[tokio::test]
   async fn subscribe_to_record_test() {
