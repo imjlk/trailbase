@@ -11,13 +11,10 @@ use std::sync::{
   atomic::{AtomicI64, Ordering},
   Arc,
 };
-use trailbase_sqlite::{
-  connection::{extract_record_values, extract_row_id},
-  params,
-};
+use trailbase_sqlite::connection::{extract_record_values, extract_row_id};
 
 use crate::auth::user::User;
-use crate::records::sql_to_json::value_to_json;
+use crate::records::sql_to_json::valueref_to_json;
 use crate::records::RecordApi;
 use crate::records::{Permission, RecordError};
 use crate::table_metadata::{TableMetadata, TableMetadataCache};
@@ -148,7 +145,7 @@ impl SubscriptionManager {
     s: &ManagerState,
     conn: &rusqlite::Connection,
     subs: &[Subscription],
-    record: &[(&str, rusqlite::types::Value)],
+    record: &[(&str, rusqlite::types::ValueRef<'_>)],
     event: &DbEvent,
   ) -> Vec<usize> {
     let mut dead_subscriptions: Vec<usize> = vec![];
@@ -158,13 +155,9 @@ impl SubscriptionManager {
         continue;
       };
 
-      if let Err(_err) = api.check_record_level_read_access(
-        conn,
-        Permission::Read,
-        // TODO: Maybe we could inject ValueRef instead to avoid repeated cloning.
-        record.to_owned(),
-        sub.user.as_ref(),
-      ) {
+      if let Err(_err) =
+        api.check_record_level_read_access(conn, Permission::Read, record, sub.user.as_ref())
+      {
         // This can happen if the record api configuration has changed since originally
         // subscribed. In this case we just send and error and cancel the subscription.
         let _ = sub.channel.try_send(DbEvent::Error("Access denied".into()));
@@ -219,10 +212,10 @@ impl SubscriptionManager {
     };
 
     // Join values with column names.
-    let record: Vec<_> = record_values
-      .into_iter()
+    let record: Vec<(&str, rusqlite::types::ValueRef<'_>)> = record_values
+      .iter()
       .enumerate()
-      .map(|(idx, v)| (table_metadata.schema.columns[idx].name.as_str(), v))
+      .map(|(idx, v)| (table_metadata.schema.columns[idx].name.as_str(), v.into()))
       .collect();
 
     // Build a JSON-encoded SQLite event (insert, update, delete).
@@ -231,7 +224,7 @@ impl SubscriptionManager {
         record
           .iter()
           .filter_map(|(name, value)| {
-            if let Ok(v) = value_to_json(value.clone()) {
+            if let Ok(v) = valueref_to_json(*value) {
               return Some(((*name).to_string(), v));
             };
             return None;
@@ -405,7 +398,7 @@ impl SubscriptionManager {
       .conn
       .query_row(
         &format!(r#"SELECT _rowid_ FROM "{table_name}" WHERE "{pk_column}" = $1"#),
-        params!(record.clone()),
+        [record],
       )
       .await?
     else {
@@ -569,6 +562,8 @@ async fn decode_sse_json_event(event: Event) -> serde_json::Value {
 mod tests {
   use super::DbEvent;
   use super::*;
+  use trailbase_sqlite::params;
+
   use crate::app_state::test_state;
   use crate::records::{add_record_api, AccessRules, Acls, PermissionFlag};
 
