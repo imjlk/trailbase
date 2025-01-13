@@ -222,12 +222,22 @@ impl SubscriptionManager {
     };
   }
 
+  #[cfg(test)]
   pub fn num_record_subscriptions(&self) -> usize {
     let mut count: usize = 0;
     for table in self.state.record_subscriptions.read().values() {
       for record in table.values() {
         count += record.len();
       }
+    }
+    return count;
+  }
+
+  #[cfg(test)]
+  pub fn num_table_subscriptions(&self) -> usize {
+    let mut count: usize = 0;
+    for table in self.state.table_subscriptions.read().values() {
+      count += table.len();
     }
     return count;
   }
@@ -784,68 +794,77 @@ mod tests {
 
     let manager = state.subscription_manager();
     let api = state.lookup_record_api("api_name").unwrap();
-    let cleanup = manager
-      .add_table_subscription(state.clone(), api, None)
-      .await
-      .unwrap();
-    let receiver = &cleanup.stream;
 
-    let record_id_raw = 0;
-    conn
-      .query_row(
-        "INSERT INTO test (id, text) VALUES ($1, 'foo')",
-        params!(record_id_raw),
-      )
-      .await
-      .unwrap();
+    {
+      let cleanup = manager
+        .add_table_subscription(state.clone(), api, None)
+        .await
+        .unwrap();
+      let receiver = &cleanup.stream;
 
-    conn
-      .execute(
-        "UPDATE test SET text = $1 WHERE id = $2",
-        params!("bar", record_id_raw),
-      )
-      .await
-      .unwrap();
+      assert_eq!(1, manager.num_table_subscriptions());
 
-    let expected = serde_json::json!({
-      "id": record_id_raw,
-      "text": "foo",
-    });
-    match decode_db_event(receiver.recv().await.unwrap()).await {
-      DbEvent::Insert(Some(value)) => {
-        assert_eq!(value, expected);
-      }
-      x => {
-        assert!(false, "Expected update, got: {x:?}");
-      }
-    };
+      let record_id_raw = 0;
+      conn
+        .query_row(
+          "INSERT INTO test (id, text) VALUES ($1, 'foo')",
+          params!(record_id_raw),
+        )
+        .await
+        .unwrap();
 
-    let expected = serde_json::json!({
-      "id": record_id_raw,
-      "text": "bar",
-    });
-    match decode_db_event(receiver.recv().await.unwrap()).await {
-      DbEvent::Update(Some(value)) => {
-        assert_eq!(value, expected);
-      }
-      x => {
-        assert!(false, "Expected update, got: {x:?}");
-      }
-    };
+      conn
+        .execute(
+          "UPDATE test SET text = $1 WHERE id = $2",
+          params!("bar", record_id_raw),
+        )
+        .await
+        .unwrap();
 
-    conn
-      .execute("DELETE FROM test WHERE id = $1", params!(record_id_raw))
-      .await
-      .unwrap();
+      let expected = serde_json::json!({
+        "id": record_id_raw,
+        "text": "foo",
+      });
+      match decode_db_event(receiver.recv().await.unwrap()).await {
+        DbEvent::Insert(Some(value)) => {
+          assert_eq!(value, expected);
+        }
+        x => {
+          assert!(false, "Expected update, got: {x:?}");
+        }
+      };
 
-    match decode_db_event(receiver.recv().await.unwrap()).await {
-      DbEvent::Delete(Some(value)) => {
-        assert_eq!(value, expected);
-      }
-      x => {
-        assert!(false, "Expected update, got: {x:?}");
+      let expected = serde_json::json!({
+        "id": record_id_raw,
+        "text": "bar",
+      });
+      match decode_db_event(receiver.recv().await.unwrap()).await {
+        DbEvent::Update(Some(value)) => {
+          assert_eq!(value, expected);
+        }
+        x => {
+          assert!(false, "Expected update, got: {x:?}");
+        }
+      };
+
+      conn
+        .execute("DELETE FROM test WHERE id = $1", params!(record_id_raw))
+        .await
+        .unwrap();
+
+      match decode_db_event(receiver.recv().await.unwrap()).await {
+        DbEvent::Delete(Some(value)) => {
+          assert_eq!(value, expected);
+        }
+        x => {
+          assert!(false, "Expected update, got: {x:?}");
+        }
       }
     }
+
+    conn.query("SELECT 1", ()).await.unwrap();
+
+    assert_eq!(0, manager.num_table_subscriptions());
   }
 
   #[tokio::test]
