@@ -650,7 +650,9 @@ mod tests {
   use super::*;
   use trailbase_sqlite::params;
 
+  use crate::admin::user::*;
   use crate::app_state::test_state;
+  use crate::auth::api::login::login_with_password;
   use crate::records::{add_record_api, AccessRules, Acls, PermissionFlag};
 
   async fn decode_db_event(event: Event) -> DbEvent {
@@ -882,6 +884,119 @@ mod tests {
     conn.query("SELECT 1", ()).await.unwrap();
 
     assert_eq!(0, manager.num_record_subscriptions());
+  }
+
+  #[tokio::test]
+  async fn subscription_acl_test() {
+    let state = test_state(None).await.unwrap();
+    let conn = state.conn().clone();
+
+    conn
+      .execute(
+        "CREATE TABLE test (
+            id          INTEGER PRIMARY KEY,
+            user        BLOB NOT NULL,
+            text        TEXT
+         ) STRICT",
+        (),
+      )
+      .await
+      .unwrap();
+
+    state.table_metadata().invalidate_all().await.unwrap();
+
+    // Register message table as record api with moderator read access.
+    add_record_api(
+      &state,
+      "api_name",
+      "test",
+      Acls {
+        authenticated: vec![PermissionFlag::Read],
+        ..Default::default()
+      },
+      AccessRules {
+        read: Some("EXISTS(SELECT 1 FROM test AS m WHERE _USER_.id = _ROW_.user)".to_string()),
+        ..Default::default()
+      },
+    )
+    .await
+    .unwrap();
+
+    let user_x_email = "user_x@bar.com";
+    let password = "Secret!1!!";
+
+    let sse_or = add_subscription_sse_handler(
+      State(state.clone()),
+      Path(("api_name".to_string(), "*".to_string())),
+      None,
+    )
+    .await;
+
+    assert!(matches!(sse_or, Err(RecordError::Forbidden)));
+
+    let user_x = create_user_for_test(&state, user_x_email, password)
+      .await
+      .unwrap()
+      .into_bytes();
+    let user_x_token = login_with_password(&state, user_x_email, password)
+      .await
+      .unwrap();
+
+    // Check that we can subscribe to table wide changes.
+    {
+      let _ = add_subscription_sse_handler(
+        State(state.clone()),
+        Path(("api_name".to_string(), "*".to_string())),
+        User::from_auth_token(&state, &user_x_token.auth_token),
+      )
+      .await
+      .unwrap();
+    }
+
+    let record_id_raw = 0;
+    let record_id = trailbase_sqlite::Value::Integer(record_id_raw);
+    let _rowid: i64 = conn
+      .query_row(
+        "INSERT INTO test (id, user, text) VALUES ($1, $2, 'foo') RETURNING _rowid_",
+        [record_id, trailbase_sqlite::Value::Blob(user_x.to_vec())],
+      )
+      .await
+      .unwrap()
+      .unwrap()
+      .get(0)
+      .unwrap();
+
+    // Assert user_x can subscribe to their record.
+    {
+      let _ = add_subscription_sse_handler(
+        State(state.clone()),
+        Path(("api_name".to_string(), record_id_raw.to_string())),
+        User::from_auth_token(&state, &user_x_token.auth_token),
+      )
+      .await
+      .unwrap();
+    }
+
+    // Assert user_y cannot subscribe to user_x's record.
+    {
+      let user_y_email = "user_y@bar.com";
+      let _user_y = create_user_for_test(&state, user_y_email, password)
+        .await
+        .unwrap()
+        .into_bytes();
+      let user_y_token = login_with_password(&state, user_y_email, password)
+        .await
+        .unwrap();
+
+      let sse_or = add_subscription_sse_handler(
+        State(state.clone()),
+        Path(("api_name".to_string(), record_id_raw.to_string())),
+        User::from_auth_token(&state, &user_y_token.auth_token),
+      )
+      .await;
+
+      assert!(matches!(sse_or, Err(RecordError::Forbidden)));
+    }
   }
 }
 
