@@ -533,21 +533,28 @@ pub async fn add_subscription_sse_handler(
 
     let mgr_state = mgr.state.clone();
     let guard = scopeguard::guard((), move |_| {
-      let mut lock = mgr_state.record_subscriptions.write();
-      let x = lock.get_mut(&table_name).and_then(|x| x.get_mut(&row_id));
-      if let Some(x) = x {
-        x.retain(|sub| {
-          return sub.subscription_id != sub_id;
-        });
+      state.conn().call_and_forget(move |conn| {
+        let mut lock = mgr_state.record_subscriptions.write();
+        let subs = lock.get_mut(&table_name).and_then(|x| x.get_mut(&row_id));
+        if let Some(subs) = subs {
+          subs.retain(|sub| {
+            return sub.subscription_id != sub_id;
+          });
 
-        if x.is_empty() {
-          lock.get_mut(&table_name).unwrap().remove(&row_id);
+          if subs.is_empty() {
+            let table = lock.get_mut(&table_name).unwrap();
+            table.remove(&row_id);
 
-          if lock.is_empty() {
-            lock.remove(&table_name);
+            if table.is_empty() {
+              lock.remove(&table_name);
+
+              if lock.is_empty() && mgr_state.table_subscriptions.read().is_empty() {
+                conn.preupdate_hook(NO_HOOK);
+              }
+            }
           }
         }
-      }
+      });
     });
 
     let encode = move |ev: Event| -> Result<Event, axum::Error> {
@@ -809,6 +816,9 @@ mod tests {
     assert_eq!(1, manager.num_record_subscriptions());
 
     drop(sse);
+
+    // Implicitly await for the cleanup to be scheduled on the sqlite executor.
+    conn.query("SELECT 1", ()).await.unwrap();
 
     assert_eq!(0, manager.num_record_subscriptions());
   }
