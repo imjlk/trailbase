@@ -3,32 +3,37 @@
 use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Method;
+use std::borrow::Cow;
 use std::sync::Arc;
+use thiserror::Error;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+// TODO:
+//
+//  * Hermetic test setup (right now server needs to be running), will fail CI.
+//  * Fewer allocations
+//  * Fewer format!
+
+#[derive(Debug, Error)]
+pub enum Error {
+  #[error("Reqwest: {0}")]
+  Reqwest(#[from] reqwest::Error),
+  #[error("JSON: {0}")]
+  Json(#[from] serde_json::Error),
+  #[error("JWT: {0}")]
+  Jwt(#[from] jsonwebtoken::errors::Error),
+  #[error("Url: {0}")]
+  Url(#[from] url::ParseError),
+  #[error("Precondition: {0}")]
+  Precondition(&'static str),
+}
+
+#[derive(Clone, Debug)]
 pub struct User {
   pub sub: String,
   pub email: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Credentials {
-  email: String,
-  password: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RefreshTokenRequest {
-  refresh_token: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RefreshTokenResponse {
-  auth_token: String,
-  csrf_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -38,38 +43,39 @@ pub struct Tokens {
   pub csrf_token: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RecordIdResponse {
-  pub id: String,
-}
-
-#[derive(Clone, Debug)]
-struct TokenState {
-  state: Option<(Tokens, JwtTokenClaims)>,
-  headers: HeaderMap,
-}
-
 #[derive(Clone, Debug)]
 pub struct Pagination {
   pub cursor: Option<String>,
   pub limit: Option<usize>,
 }
 
-impl TokenState {
-  fn build(tokens: Option<&Tokens>) -> TokenState {
-    let headers = build_headers(tokens);
-    return TokenState {
-      state: tokens.and_then(|tokens| {
-        Some((
-          tokens.clone(),
-          decode_auth_token::<JwtTokenClaims>(&tokens.auth_token).unwrap(),
-        ))
-      }),
-      headers,
-    };
+pub trait RecordId<'a> {
+  fn serialized_id(self) -> Cow<'a, str>;
+}
+
+impl RecordId<'_> for String {
+  fn serialized_id(self) -> Cow<'static, str> {
+    return Cow::Owned(self);
   }
 }
 
+impl<'a> RecordId<'a> for &'a String {
+  fn serialized_id(self) -> Cow<'a, str> {
+    return Cow::Borrowed(self);
+  }
+}
+
+impl<'a> RecordId<'a> for &'a str {
+  fn serialized_id(self) -> Cow<'a, str> {
+    return Cow::Borrowed(self);
+  }
+}
+
+impl RecordId<'_> for i64 {
+  fn serialized_id(self) -> Cow<'static, str> {
+    return Cow::Owned(self.to_string());
+  }
+}
 struct ThinClient {
   client: reqwest::Client,
   site: String,
@@ -83,11 +89,12 @@ impl ThinClient {
     method: Method,
     body: Option<serde_json::Value>,
     query_params: Option<Vec<(String, String)>>,
-  ) -> reqwest::Result<reqwest::Response> {
-    // TODO: return error
-    assert!(!path.starts_with("/"));
+  ) -> Result<reqwest::Response, Error> {
+    if path.starts_with("/") {
+      return Err(Error::Precondition("path must not start with '/'"));
+    }
 
-    let mut url = url::Url::parse(&format!("{}/{path}", self.site)).unwrap();
+    let mut url = url::Url::parse(&format!("{}/{path}", self.site))?;
 
     if let Some(query_params) = query_params {
       for (key, value) in query_params {
@@ -101,10 +108,10 @@ impl ThinClient {
       .headers(state.headers.clone());
 
     if let Some(body) = body {
-      builder = builder.body(serde_json::to_string(&body).unwrap());
+      builder = builder.body(serde_json::to_string(&body)?);
     }
 
-    return self.client.execute(builder.build()?).await;
+    return Ok(self.client.execute(builder.build()?).await?);
   }
 }
 
@@ -117,16 +124,14 @@ struct JwtTokenClaims {
   csrf_token: String,
 }
 
-pub fn decode_auth_token<T: DeserializeOwned>(
-  token: &str,
-) -> Result<T, jsonwebtoken::errors::Error> {
+pub fn decode_auth_token<T: DeserializeOwned>(token: &str) -> Result<T, Error> {
   let decoding_key = jsonwebtoken::DecodingKey::from_secret(&[]);
 
   // Don't validate the token, we don't have the secret key. Just deserialize the claims/contents.
   let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
   validation.insecure_disable_signature_validation();
 
-  return jsonwebtoken::decode::<T>(token, &decoding_key, &validation).map(|data| data.claims);
+  return Ok(jsonwebtoken::decode::<T>(token, &decoding_key, &validation).map(|data| data.claims)?);
 }
 
 pub struct RecordApi {
@@ -135,13 +140,14 @@ pub struct RecordApi {
 }
 
 impl RecordApi {
-  // TODO: missing
+  // TODO: add subscription APIs.
+
   pub async fn list<T: DeserializeOwned>(
     &self,
     pagination: Option<Pagination>,
     order: Option<&[&str]>,
     filters: Option<&[&str]>,
-  ) -> Result<Vec<T>, reqwest::Error> {
+  ) -> Result<Vec<T>, Error> {
     let mut params: Vec<(String, String)> = vec![];
     if let Some(pagination) = pagination {
       if let Some(cursor) = pagination.cursor {
@@ -177,42 +183,77 @@ impl RecordApi {
       )
       .await?;
 
-    return response.json().await;
+    return Ok(response.json().await?);
   }
 
-  pub async fn read<T: DeserializeOwned>(&self, id: &str) -> Result<T, reqwest::Error> {
+  pub async fn read<'a, T: DeserializeOwned>(&self, id: impl RecordId<'a>) -> Result<T, Error> {
     let response = self
       .client
       .fetch(
-        format!("{RECORD_API}/{}/{id}", self.name),
+        format!(
+          "{RECORD_API}/{name}/{id}",
+          name = self.name,
+          id = id.serialized_id()
+        ),
         Method::GET,
         None,
         None,
       )
       .await?;
 
-    return Ok(response.json().await.unwrap());
+    return Ok(response.json().await?);
   }
 
-  pub async fn create<T: Serialize>(&self, record: T) -> Result<String, reqwest::Error> {
+  pub async fn create<T: Serialize>(&self, record: T) -> Result<String, Error> {
     let response = self
       .client
       .fetch(
-        format!("{RECORD_API}/{}", self.name),
+        format!("{RECORD_API}/{name}", name = self.name),
         Method::POST,
-        Some(serde_json::to_value(record).unwrap()),
+        Some(serde_json::to_value(record)?),
         None,
       )
       .await?;
 
-    return Ok(response.json::<RecordIdResponse>().await.unwrap().id);
+    #[derive(Deserialize)]
+    pub struct RecordIdResponse {
+      pub id: String,
+    }
+
+    return Ok(response.json::<RecordIdResponse>().await?.id);
   }
 
-  pub async fn delete(&self, id: &str) -> Result<(), reqwest::Error> {
+  pub async fn update<'a, T: Serialize>(
+    &self,
+    id: impl RecordId<'a>,
+    record: T,
+  ) -> Result<(), Error> {
     self
       .client
       .fetch(
-        format!("{RECORD_API}/{}/{id}", self.name),
+        format!(
+          "{RECORD_API}/{name}/{id}",
+          name = self.name,
+          id = id.serialized_id()
+        ),
+        Method::PATCH,
+        Some(serde_json::to_value(record)?),
+        None,
+      )
+      .await?;
+
+    return Ok(());
+  }
+
+  pub async fn delete<'a>(&self, id: impl RecordId<'a>) -> Result<(), Error> {
+    self
+      .client
+      .fetch(
+        format!(
+          "{RECORD_API}/{name}/{id}",
+          name = self.name,
+          id = id.serialized_id()
+        ),
         Method::DELETE,
         None,
         None,
@@ -220,6 +261,28 @@ impl RecordApi {
       .await?;
 
     return Ok(());
+  }
+}
+
+#[derive(Clone, Debug)]
+struct TokenState {
+  state: Option<(Tokens, JwtTokenClaims)>,
+  headers: HeaderMap,
+}
+
+impl TokenState {
+  fn build(tokens: Option<&Tokens>) -> TokenState {
+    let headers = build_headers(tokens);
+    return TokenState {
+      state: tokens.and_then(|tokens| {
+        let Ok(jwt_token) = decode_auth_token::<JwtTokenClaims>(&tokens.auth_token) else {
+          log::error!("Failed to decode auth token.");
+          return None;
+        };
+        return Some((tokens.clone(), jwt_token));
+      }),
+      headers,
+    };
   }
 }
 
@@ -237,18 +300,65 @@ impl ClientState {
     method: Method,
     body: Option<serde_json::Value>,
     query_params: Option<Vec<(String, String)>>,
-  ) -> reqwest::Result<reqwest::Response> {
-    let token_state = &self.token_state;
-    // TODO: Add auto token refresh
-    // let refreshToken = _shouldRefresh(tokenState);
-    // if (refreshToken != null) {
-    //   tokenState = _tokenState = await _refreshTokensImpl(refreshToken);
-    // }
+  ) -> Result<reqwest::Response, Error> {
+    let mut token_state = self.token_state.upgradable_read();
+
+    if Self::should_refresh(&token_state) {
+      let new_token_state = Self::refresh_tokens(&self.client, &token_state).await?;
+      token_state.with_upgraded(move |state| *state = new_token_state);
+    }
 
     return self
       .client
-      .fetch(url, &token_state.read(), method, body, query_params)
+      .fetch(url, &token_state, method, body, query_params)
       .await;
+  }
+
+  #[inline]
+  fn should_refresh(token_state: &TokenState) -> bool {
+    let now = now();
+    if let Some(ref state) = token_state.state {
+      return state.1.exp - 60 < now as i64;
+    }
+    return false;
+  }
+
+  async fn refresh_tokens(
+    client: &ThinClient,
+    token_state: &TokenState,
+  ) -> Result<TokenState, Error> {
+    let Some(refresh_token) = token_state
+      .state
+      .as_ref()
+      .map(|s| s.0.refresh_token.clone())
+    else {
+      panic!("Refresh token missing");
+    };
+
+    let response = client
+      .fetch(
+        format!("{AUTH_API}/refresh"),
+        token_state,
+        Method::POST,
+        Some(serde_json::json!({
+          "refresh_token": refresh_token,
+        })),
+        None,
+      )
+      .await?;
+
+    #[derive(Deserialize)]
+    struct RefreshResponse {
+      auth_token: String,
+      csrf_token: Option<String>,
+    }
+
+    let refresh_response: RefreshResponse = response.json().await?;
+    return Ok(TokenState::build(Some(&Tokens {
+      auth_token: refresh_response.auth_token,
+      refresh_token,
+      csrf_token: refresh_response.csrf_token,
+    })));
   }
 }
 
@@ -302,7 +412,16 @@ impl Client {
     };
   }
 
-  pub async fn login(&self, email: &str, password: &str) -> reqwest::Result<Tokens> {
+  pub async fn refresh(&self) -> Result<(), Error> {
+    let mut token_state = self.state.token_state.upgradable_read();
+    let new_token_state = ClientState::refresh_tokens(&self.state.client, &token_state).await?;
+    token_state.with_upgraded(move |state| {
+      *state = new_token_state;
+    });
+    return Ok(());
+  }
+
+  pub async fn login(&self, email: &str, password: &str) -> Result<Tokens, Error> {
     let response = self
       .state
       .fetch(
@@ -314,14 +433,14 @@ impl Client {
         })),
         None,
       )
-      .await;
+      .await?;
 
-    let tokens: Tokens = response.unwrap().json().await.unwrap();
+    let tokens: Tokens = response.json().await?;
     self.update_tokens(Some(&tokens));
     return Ok(tokens);
   }
 
-  pub async fn logout(&self) {
+  pub async fn logout(&self) -> Result<(), Error> {
     let refresh_token: Option<String> = self
       .state
       .token_state
@@ -330,7 +449,7 @@ impl Client {
       .as_ref()
       .and_then(|s| s.0.refresh_token.clone());
     if let Some(refresh_token) = refresh_token {
-      let _ = self
+      self
         .state
         .fetch(
           format!("{AUTH_API}/logout"),
@@ -338,15 +457,17 @@ impl Client {
           Some(serde_json::json!({"refresh_token": refresh_token})),
           None,
         )
-        .await;
+        .await?;
     } else {
-      let _ = self
+      self
         .state
         .fetch(format!("{AUTH_API}/logout"), Method::GET, None, None)
-        .await;
+        .await?;
     }
 
     self.update_tokens(None);
+
+    return Ok(());
   }
 
   fn update_tokens(&self, tokens: Option<&Tokens>) -> TokenState {
@@ -356,10 +477,7 @@ impl Client {
     // _authChange?.call(this, state.state?.$1);
 
     if let Some(ref s) = state.state {
-      let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+      let now = now();
       if s.1.exp < now as i64 {
         log::warn!("Token expired");
       }
@@ -374,21 +492,37 @@ fn build_headers(tokens: Option<&Tokens>) -> HeaderMap {
   base.insert("Content-Type", HeaderValue::from_static("application/json"));
 
   if let Some(tokens) = tokens {
-    base.insert(
-      "Authorization",
-      HeaderValue::from_str(&format!("Bearer {}", tokens.auth_token)).unwrap(),
-    );
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", tokens.auth_token)) {
+      base.insert("Authorization", value);
+    } else {
+      log::error!("Failed to build bearer token.");
+    }
 
     if let Some(ref refresh) = tokens.refresh_token {
-      base.insert("Refresh-Token", HeaderValue::from_str(refresh).unwrap());
+      if let Ok(value) = HeaderValue::from_str(refresh) {
+        base.insert("Refresh-Token", value);
+      } else {
+        log::error!("Failed to build refresh token header.");
+      }
     }
 
     if let Some(ref csrf) = tokens.csrf_token {
-      base.insert("CSRF-Token", HeaderValue::from_str(csrf).unwrap());
+      if let Ok(value) = HeaderValue::from_str(csrf) {
+        base.insert("CSRF-Token", value);
+      } else {
+        log::error!("Failed to build refresh token header.");
+      }
     }
   }
 
   return base;
+}
+
+fn now() -> u64 {
+  return std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Duration since epoch")
+    .as_secs();
 }
 
 const AUTH_API: &str = "api/auth/v1";
@@ -396,7 +530,9 @@ const RECORD_API: &str = "api/records/v1";
 
 #[cfg(test)]
 mod tests {
+  use super::*;
   use crate::Client;
+
   use serde_json::json;
 
   async fn connect() -> Client {
@@ -417,9 +553,19 @@ mod tests {
     let user = client.user().unwrap();
     assert_eq!(user.email, "admin@localhost");
 
-    client.logout().await;
+    client.refresh().await.unwrap();
 
+    client.logout().await.unwrap();
     assert!(client.tokens().is_none());
+  }
+
+  #[derive(Debug, Clone, Deserialize, Serialize)]
+  struct SimpleStrict {
+    id: String,
+
+    text_null: Option<String>,
+    text_default: Option<String>,
+    text_not_null: String,
   }
 
   #[tokio::test]
@@ -427,10 +573,7 @@ mod tests {
     let client = connect().await;
     let api = client.records("simple_strict_table");
 
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .unwrap()
-      .as_secs();
+    let now = now();
 
     let messages = vec![
       format!("rust client test 0: =?&{now}"),
@@ -443,6 +586,7 @@ mod tests {
     }
 
     {
+      // List one specific message.
       let filter = format!("text_not_null={}", messages[0]);
       let filters = vec![filter.as_str()];
       let records = api
@@ -451,6 +595,62 @@ mod tests {
         .unwrap();
 
       assert_eq!(records.len(), 1);
+    }
+
+    {
+      // List all the messages
+      let filter = format!("text_not_null[like]=% =?&{now}");
+      let records_ascending: Vec<SimpleStrict> = api
+        .list(None, Some(&["+text_not_null"]), Some(&[&filter]))
+        .await
+        .unwrap();
+
+      let messages_ascending: Vec<_> = records_ascending
+        .into_iter()
+        .map(|s| s.text_not_null)
+        .collect();
+      assert_eq!(messages, messages_ascending);
+
+      let records_descending: Vec<SimpleStrict> = api
+        .list(None, Some(&["-text_not_null"]), Some(&[&filter]))
+        .await
+        .unwrap();
+
+      let messages_descending: Vec<_> = records_descending
+        .into_iter()
+        .map(|s| s.text_not_null)
+        .collect();
+      assert_eq!(
+        messages,
+        messages_descending.into_iter().rev().collect::<Vec<_>>()
+      );
+    }
+
+    {
+      // Read
+      let record: SimpleStrict = api.read(&ids[0]).await.unwrap();
+      assert_eq!(ids[0], record.id);
+      assert_eq!(record.text_not_null, messages[0]);
+    }
+
+    {
+      // Update
+      let updated_message = format!("rust client updated test 0: {now}");
+      api
+        .update(&ids[0], json!({"text_not_null": updated_message}))
+        .await
+        .unwrap();
+
+      let record: SimpleStrict = api.read(&ids[0]).await.unwrap();
+      assert_eq!(record.text_not_null, updated_message);
+    }
+
+    {
+      // Delete
+      api.delete(&ids[0]).await.unwrap();
+
+      let response = api.read::<SimpleStrict>(&ids[0]).await;
+      assert!(response.is_err());
     }
   }
 }
