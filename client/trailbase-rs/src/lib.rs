@@ -85,7 +85,7 @@ impl ThinClient {
   async fn fetch(
     &self,
     path: String,
-    state: &TokenState,
+    headers: HeaderMap,
     method: Method,
     body: Option<serde_json::Value>,
     query_params: Option<Vec<(String, String)>>,
@@ -102,10 +102,7 @@ impl ThinClient {
       }
     }
 
-    let mut builder = self
-      .client
-      .request(method, url)
-      .headers(state.headers.clone());
+    let mut builder = self.client.request(method, url).headers(headers);
 
     if let Some(body) = body {
       builder = builder.body(serde_json::to_string(&body)?);
@@ -134,6 +131,7 @@ pub fn decode_auth_token<T: DeserializeOwned>(token: &str) -> Result<T, Error> {
   return Ok(jsonwebtoken::decode::<T>(token, &decoding_key, &validation).map(|data| data.claims)?);
 }
 
+#[derive(Clone)]
 pub struct RecordApi {
   client: Arc<ClientState>,
   name: String,
@@ -301,16 +299,40 @@ impl ClientState {
     body: Option<serde_json::Value>,
     query_params: Option<Vec<(String, String)>>,
   ) -> Result<reqwest::Response, Error> {
-    let mut token_state = self.token_state.upgradable_read();
+    let (needs_refetch, mut headers) = {
+      let token_state = self.token_state.read();
+      (
+        Self::should_refresh(&token_state),
+        token_state.headers.clone(),
+      )
+    };
 
-    if Self::should_refresh(&token_state) {
-      let new_token_state = Self::refresh_tokens(&self.client, &token_state).await?;
-      token_state.with_upgraded(move |state| *state = new_token_state);
+    if needs_refetch {
+      let refresh_token = {
+        let token_state = self.token_state.read();
+        let Some(ref refresh_token) = token_state
+          .state
+          .as_ref()
+          .and_then(|s| s.0.refresh_token.clone())
+        else {
+          return Err(Error::Precondition("Missing refresh token"));
+        };
+        refresh_token.clone()
+      };
+
+      let new_token_state =
+        ClientState::refresh_tokens(&self.client, headers, refresh_token).await?;
+
+      let new_headers = new_token_state.headers.clone();
+
+      *self.token_state.write() = new_token_state;
+
+      headers = new_headers;
     }
 
     return self
       .client
-      .fetch(url, &token_state, method, body, query_params)
+      .fetch(url, headers, method, body, query_params)
       .await;
   }
 
@@ -323,22 +345,29 @@ impl ClientState {
     return false;
   }
 
-  async fn refresh_tokens(
-    client: &ThinClient,
+  fn extract_refresh_token_and_headers(
     token_state: &TokenState,
-  ) -> Result<TokenState, Error> {
-    let Some(refresh_token) = token_state
-      .state
-      .as_ref()
-      .map(|s| s.0.refresh_token.clone())
-    else {
-      panic!("Refresh token missing");
+  ) -> Result<(String, HeaderMap), Error> {
+    let Some(ref state) = token_state.state else {
+      return Err(Error::Precondition("Not logged int?"));
     };
 
+    let Some(ref refresh_token) = state.0.refresh_token else {
+      return Err(Error::Precondition("Missing refresh token"));
+    };
+
+    return Ok((refresh_token.clone(), token_state.headers.clone()));
+  }
+
+  async fn refresh_tokens(
+    client: &ThinClient,
+    headers: HeaderMap,
+    refresh_token: String,
+  ) -> Result<TokenState, Error> {
     let response = client
       .fetch(
         format!("{AUTH_API}/refresh"),
-        token_state,
+        headers,
         Method::POST,
         Some(serde_json::json!({
           "refresh_token": refresh_token,
@@ -356,7 +385,7 @@ impl ClientState {
     let refresh_response: RefreshResponse = response.json().await?;
     return Ok(TokenState::build(Some(&Tokens {
       auth_token: refresh_response.auth_token,
-      refresh_token,
+      refresh_token: Some(refresh_token),
       csrf_token: refresh_response.csrf_token,
     })));
   }
@@ -413,11 +442,12 @@ impl Client {
   }
 
   pub async fn refresh(&self) -> Result<(), Error> {
-    let mut token_state = self.state.token_state.upgradable_read();
-    let new_token_state = ClientState::refresh_tokens(&self.state.client, &token_state).await?;
-    token_state.with_upgraded(move |state| {
-      *state = new_token_state;
-    });
+    let (refresh_token, headers) =
+      ClientState::extract_refresh_token_and_headers(&self.state.token_state.read())?;
+    let new_token_state =
+      ClientState::refresh_tokens(&self.state.client, headers, refresh_token).await?;
+
+    *self.state.token_state.write() = new_token_state;
     return Ok(());
   }
 
@@ -535,10 +565,32 @@ mod tests {
 
   use serde_json::json;
 
+  #[derive(Debug, Clone, Deserialize, Serialize)]
+  struct SimpleStrict {
+    id: String,
+
+    text_null: Option<String>,
+    text_default: Option<String>,
+    text_not_null: String,
+  }
+
   async fn connect() -> Client {
     let client = Client::new("http://127.0.0.1:4000", None);
     let _ = client.login("admin@localhost", "secret").await.unwrap();
     return client;
+  }
+
+  #[tokio::test]
+  async fn is_send_test() {
+    let client = connect().await;
+    let api = client.records("simple_strict_table");
+    tokio::spawn(async move {
+      // This would not compile if locks would be held across async function calls.
+      let response = api.read::<SimpleStrict>(0).await;
+      assert!(response.is_err());
+    })
+    .await
+    .unwrap();
   }
 
   #[tokio::test]
@@ -557,15 +609,6 @@ mod tests {
 
     client.logout().await.unwrap();
     assert!(client.tokens().is_none());
-  }
-
-  #[derive(Debug, Clone, Deserialize, Serialize)]
-  struct SimpleStrict {
-    id: String,
-
-    text_null: Option<String>,
-    text_default: Option<String>,
-    text_not_null: String,
   }
 
   #[tokio::test]
