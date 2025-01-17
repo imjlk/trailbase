@@ -2,6 +2,14 @@
 name = "trailbase-client"
 version = "0.0.1"
 edition = "2021"
+license = "OSL-3.0"
+description = "Client for accessing TrailBase's record APIs"
+homepage = "https://trailbase.io"
+repository = "https://github.com/trailbaseio/trailbase"
+readme = "../../README.md"
+exclude = [
+  "tests",
+]
 
 [dependencies]
 jsonwebtoken = { version = "9.3.0", default-features = false }
