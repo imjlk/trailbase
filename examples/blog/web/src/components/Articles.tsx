@@ -205,7 +205,7 @@ export function ArticlePage() {
       <Match when={article.error}>Failed to load: {`${article.error}`}</Match>
 
       <Match when={article()}>
-        <ArticlePageImpl article={article()!} />
+        <ArticlePageImpl article={article()!.records} />
       </Match>
     </Switch>
   );
