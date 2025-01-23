@@ -1,34 +1,55 @@
 import './App.css'
-import { createSignal } from 'solid-js'
-import solidLogo from './assets/solid.svg'
+import { createSignal, onMount } from 'solid-js'
 
-function App() {
-  const [count, setCount] = createSignal(0)
+export type InitialData = {
+  count?: number;
+};
+
+type Clicked = {
+  count: number
+};
+
+export function App({initialCount }: {initialCount?: number}) {
+  const [count, setCount] = createSignal(initialCount ?? 0)
+
+  const onClick = () => {
+    setCount((count) => count + 1);
+
+    fetch('/clicked').then(async (response) => {
+      const clicked = (await response.json()) as Clicked;
+      if (clicked.count > count()) {
+        setCount(clicked.count);
+      }
+    });
+  };
+
+  onMount(async () => {
+    const trailbase = await import("trailbase");
+    const client = new trailbase.Client("http://localhost:4000");
+    const api = client.records('counter');
+    const stream = await api.subscribe(1);
+
+    for await (const event of stream) {
+      const update = event["Update"];
+      if (update && update["value"] > count()) {
+        setCount(update["value"]);
+      }
+    }
+  });
 
   return (
     <div class="App">
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" class="logo" alt="Vite logo" />
-        </a>
-        <a href="https://www.solidjs.com" target="_blank">
-          <img src={solidLogo} class="logo solid" alt="Solid logo" />
-        </a>
-      </div>
-      <h1>Vite + Solid</h1>
+      <h1>TrailBase Cookie Clicker</h1>
+
       <div class="card">
-        <button onClick={() => setCount((count) => count + 1)}>
+        <button onClick={onClick}>
           count is {count()}
         </button>
+
         <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
+          Click the counter
         </p>
       </div>
-      <p class="read-the-docs">
-        Click on the Vite and Solid logos to learn more
-      </p>
     </div>
   )
 }
-
-export default App

@@ -204,18 +204,12 @@ importers:
 
   examples/ssr/solid-ssr-app:
     dependencies:
-      compression:
-        specifier: ^1.7.5
-        version: 1.7.5
-      express:
-        specifier: ^5.0.1
-        version: 5.0.1
-      sirv:
-        specifier: ^3.0.0
-        version: 3.0.0
       solid-js:
         specifier: ^1.9.3
         version: 1.9.4
+      trailbase:
+        specifier: workspace:*
+        version: link:../../../trailbase-core/js/client
     devDependencies:
       '@types/express':
         specifier: ^5.0.0
@@ -223,9 +217,18 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.10.7
+      compression:
+        specifier: ^1.7.5
+        version: 1.7.5
       cross-env:
         specifier: ^7.0.3
         version: 7.0.3
+      express:
+        specifier: ^5.0.1
+        version: 5.0.1
+      sirv:
+        specifier: ^3.0.0
+        version: 3.0.0
       vite:
         specifier: ^6.0.1
         version: 6.0.11(@types/node@22.10.7)(jiti@2.4.2)(yaml@2.7.0)

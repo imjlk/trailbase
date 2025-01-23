@@ -33,5 +33,10 @@ record_apis: [
     create_access_rule: "_REQ_.user IS NULL OR _REQ_.user = _USER_.id"
     update_access_rule: "_ROW_.user = _USER_.id"
     delete_access_rule: "_ROW_.user = _USER_.id"
+  },
+  {
+    name: "counter"
+    table_name: "counter"
+    acl_world: [READ]
   }
 ]
