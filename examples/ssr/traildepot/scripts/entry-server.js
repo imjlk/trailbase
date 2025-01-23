@@ -1,0 +1,1 @@
+../../solid-ssr-app/dist/server/entry-server.js
