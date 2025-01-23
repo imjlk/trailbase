@@ -1,18 +1,12 @@
 import { renderToString, generateHydrationScript } from 'solid-js/web'
-import { App, type InitialData } from './App'
+import { App, type Clicked } from './App'
 
 export function render(_url: string, count: number) {
-  const head = generateHydrationScript();
-  const html = renderToString(() => <App initialCount={count} />);
-
-  const initialData : InitialData = {
-    count,
-  };
-  const data = `<script>window.__INITIAL_DATA__ = ${JSON.stringify(initialData)};</script>`;
+  const data = { count } satisfies Clicked;
 
   return {
-    head,
-    html,
-    data,
+    head: generateHydrationScript(),
+    html: renderToString(() => <App initialCount={count} />),
+    data: `<script>window.__INITIAL_DATA__ = ${JSON.stringify(data)};</script>`,
   };
 }

@@ -26,3 +26,7 @@ The resulting template is set up to use "express.js", see
     * pick up the generated HTML template for the client,
     * generate the hydration script in the HTML head,
     * and run the server's entry-point to render the initial HTML body.
+
+## TODO
+
+* Add tailwind

@@ -211,6 +211,9 @@ importers:
         specifier: workspace:*
         version: link:../../../trailbase-core/js/client
     devDependencies:
+      '@eslint/js':
+        specifier: ^9.18.0
+        version: 9.18.0
       '@types/express':
         specifier: ^5.0.0
         version: 5.0.0
@@ -223,12 +226,21 @@ importers:
       cross-env:
         specifier: ^7.0.3
         version: 7.0.3
+      eslint:
+        specifier: ^9.18.0
+        version: 9.18.0(jiti@2.4.2)
       express:
         specifier: ^5.0.1
         version: 5.0.1
+      globals:
+        specifier: ^15.14.0
+        version: 15.14.0
       sirv:
         specifier: ^3.0.0
         version: 3.0.0
+      typescript-eslint:
+        specifier: ^8.21.0
+        version: 8.21.0(eslint@9.18.0(jiti@2.4.2))(typescript@5.7.3)
       vite:
         specifier: ^6.0.1
         version: 6.0.11(@types/node@22.10.7)(jiti@2.4.2)(yaml@2.7.0)

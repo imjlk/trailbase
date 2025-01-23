@@ -1,13 +1,15 @@
 import './App.css'
 import { createSignal, onMount } from 'solid-js'
 
-export type InitialData = {
-  count?: number;
-};
-
-type Clicked = {
+export type Clicked = {
   count: number
 };
+
+declare global {
+  interface Window {
+    __INITIAL_DATA__: Clicked | null;
+  }
+}
 
 export function App({initialCount }: {initialCount?: number}) {
   const [count, setCount] = createSignal(initialCount ?? 0)
@@ -25,14 +27,21 @@ export function App({initialCount }: {initialCount?: number}) {
 
   onMount(async () => {
     const trailbase = await import("trailbase");
-    const client = new trailbase.Client("http://localhost:4000");
-    const api = client.records('counter');
-    const stream = await api.subscribe(1);
 
-    for await (const event of stream) {
-      const update = event["Update"];
-      if (update && update["value"] > count()) {
-        setCount(update["value"]);
+    const client = new trailbase.Client(window.location.origin);
+    const api = client.records('counter');
+    const reader = (await api.subscribe(1)).getReader();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || !value) {
+        break;
+      }
+
+      const update = value as { Update?: { value? : number}};
+      const updatedCount = update.Update?.value;
+      if (updatedCount && updatedCount > count()) {
+        setCount(updatedCount);
       }
     }
   });
