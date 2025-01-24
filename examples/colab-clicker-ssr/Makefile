@@ -1,5 +1,5 @@
 TRAILBIN ?= RUST_BACKTRACE=1 cargo run --
-DISTDIR := solid-ssr-app/dist
+DISTDIR := dist
 
 run: traildepot/scripts/entry-server.js
 	${TRAILBIN} --data-dir=traildepot run --public-dir=${DISTDIR}/client
