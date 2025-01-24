@@ -29,4 +29,4 @@ The resulting template is set up to use "express.js", see
 
 ## TODO
 
-* Add tailwind
+* Fix Deno.FS bindings

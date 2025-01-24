@@ -1,4 +1,3 @@
-import './App.css'
 import { createSignal, onMount } from 'solid-js'
 
 export type Clicked = {
@@ -47,18 +46,21 @@ export function App({initialCount }: {initialCount?: number}) {
   });
 
   return (
-    <div class="App">
-      <h1>TrailBase Cookie Clicker</h1>
+    <div class="flex flex-col gap-4 text-neutral-800">
+      <h1>TrailBase Clicker</h1>
 
-      <div class="card">
-        <button onClick={onClick}>
-          count is {count()}
+      <div class="px-4 py-2">
+        <button
+          class="rounded bg-neutral-100 p-2 font-medium hover:scale-110 hover:outline outline-accent-600 active:scale-100 animate-all"
+          onClick={onClick}
+        >
+          clicked {count()} times
         </button>
+      </div>
 
         <p>
-          Click the counter
+          Click the button across different tabs, windows or browsers.
         </p>
-      </div>
     </div>
   )
 }
