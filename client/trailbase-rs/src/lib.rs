@@ -236,10 +236,16 @@ impl RecordApi {
 
     #[derive(Deserialize)]
     pub struct RecordIdResponse {
-      pub id: String,
+      pub ids: Vec<String>,
     }
 
-    return Ok(response.json::<RecordIdResponse>().await?.id);
+    return Ok(
+      response
+        .json::<RecordIdResponse>()
+        .await?
+        .ids
+        .swap_remove(0),
+    );
   }
 
   pub async fn update<'a, T: Serialize>(

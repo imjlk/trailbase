@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 use trailbase_sqlite::schema::{FileUpload, FileUploadInput, FileUploads};
-use trailbase_sqlite::{NamedParams, Value};
+use trailbase_sqlite::{NamedParams, Params as _, Value};
 
 use crate::config::proto::ConflictResolutionStrategy;
 use crate::records::files::delete_files_in_row;
@@ -439,6 +439,86 @@ impl InsertQueryBuilder {
     };
 
     return Ok(row);
+  }
+
+  fn extract_record_id(
+    data_type: ColumnDataType,
+    row: &rusqlite::Row,
+  ) -> Result<String, trailbase_sqlite::Error> {
+    return match data_type {
+      ColumnDataType::Blob => Ok(BASE64_URL_SAFE.encode(row.get::<_, [u8; 16]>(0)?)),
+      ColumnDataType::Integer => Ok(row.get::<_, i64>(0)?.to_string()),
+      _ => Err(trailbase_sqlite::Error::Other(
+        "Unexpected data type".into(),
+      )),
+    };
+  }
+
+  pub(crate) async fn run_bulk(
+    state: &AppState,
+    params_list: Vec<Params>,
+    conflict_resolution: Option<ConflictResolutionStrategy>,
+    return_column_name: Option<&str>,
+    data_type: ColumnDataType,
+  ) -> Result<Vec<String>, QueryError> {
+    let mut all_files: FileMetadataContents = vec![];
+    let mut query_and_params: Vec<(String, NamedParams)> = vec![];
+
+    for params in params_list {
+      let (query, named_params, mut files) =
+        Self::build_insert_query(params, conflict_resolution, return_column_name)?;
+
+      all_files.append(&mut files);
+      query_and_params.push((query, named_params));
+    }
+
+    // We're storing any files to the object store first to make sure the DB entry is valid right
+    // after commit and not racily pointing to soon-to-be-written files.
+    if !all_files.is_empty() {
+      let objectstore = state.objectstore();
+      for (metadata, content) in &mut all_files {
+        write_file(objectstore, metadata, content).await?;
+      }
+    }
+
+    let result = state
+      .conn()
+      .call(move |conn| {
+        let mut rows = Vec::<String>::with_capacity(query_and_params.len());
+
+        let tx = conn.transaction()?;
+
+        for (query, named_params) in query_and_params {
+          let mut stmt = tx.prepare(&query)?;
+          named_params.bind(&mut stmt)?;
+          let mut result = stmt.raw_query();
+
+          match result.next()? {
+            Some(row) => rows.push(Self::extract_record_id(data_type, row)?),
+            _ => {
+              return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+          };
+        }
+
+        tx.commit()?;
+
+        return Ok(rows);
+      })
+      .await;
+
+    if result.is_err() && !all_files.is_empty() {
+      let objectstore = state.objectstore();
+
+      for (metadata, _files) in &all_files {
+        let path = object_store::path::Path::from(metadata.path());
+        if let Err(err) = objectstore.delete(&path).await {
+          warn!("Failed to cleanup file after failed insertion (leak): {err}");
+        }
+      }
+    }
+
+    return Ok(result?);
   }
 
   fn build_insert_query(
