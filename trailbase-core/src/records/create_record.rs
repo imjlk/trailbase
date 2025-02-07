@@ -23,6 +23,7 @@ pub struct CreateRecordResponse {
   pub ids: Vec<String>,
 }
 
+#[inline]
 fn extract_record(value: serde_json::Value) -> Result<JsonRow, RecordError> {
   return Ok(match value {
     serde_json::Value::Object(record) => record,
@@ -32,6 +33,7 @@ fn extract_record(value: serde_json::Value) -> Result<JsonRow, RecordError> {
   });
 }
 
+#[inline]
 fn extract_records(value: serde_json::Value) -> Result<Vec<JsonRow>, RecordError> {
   return Ok(match value {
     serde_json::Value::Object(record) => vec![record],
@@ -53,6 +55,20 @@ fn extract_records(value: serde_json::Value) -> Result<Vec<JsonRow>, RecordError
       ));
     }
   });
+}
+
+#[inline]
+fn extract_record_id(
+  data_type: ColumnDataType,
+  row: &rusqlite::Row,
+) -> Result<String, trailbase_sqlite::Error> {
+  return match data_type {
+    ColumnDataType::Blob => Ok(BASE64_URL_SAFE.encode(row.get::<_, [u8; 16]>(0)?)),
+    ColumnDataType::Integer => Ok(row.get::<_, i64>(0)?.to_string()),
+    _ => Err(trailbase_sqlite::Error::Other(
+      "Unexpected data type".into(),
+    )),
+  };
 }
 
 /// Create new record.
@@ -132,44 +148,30 @@ pub async fn create_record_handler(
   }
 
   let pk_column = api.record_pk_column();
+  let data_type = pk_column.data_type;
   let record_ids = match params_list.len() {
     0 => {
       return Err(RecordError::Internal("".into()));
     }
     1 => {
-      let row = InsertQueryBuilder::run(
+      let record_id = InsertQueryBuilder::run(
         &state,
         params_list.swap_remove(0),
         api.insert_conflict_resolution_strategy(),
         Some(&pk_column.name),
+        move |row| extract_record_id(data_type, row),
       )
       .await
       .map_err(|err| RecordError::Internal(err.into()))?;
 
-      // TODO: move conversion into IsertQueryBuilder::run.
-      vec![match pk_column.data_type {
-        ColumnDataType::Blob => BASE64_URL_SAFE.encode(
-          row
-            .get::<[u8; 16]>(0)
-            .map_err(|err| RecordError::Internal(err.into()))?,
-        ),
-        ColumnDataType::Integer => row
-          .get::<i64>(0)
-          .map_err(|err| RecordError::Internal(err.into()))?
-          .to_string(),
-        _ => {
-          return Err(RecordError::Internal(
-            format!("Unexpected data type: {:?}", pk_column.data_type).into(),
-          ));
-        }
-      }]
+      vec![record_id]
     }
     _ => InsertQueryBuilder::run_bulk(
       &state,
       params_list,
       api.insert_conflict_resolution_strategy(),
       Some(&pk_column.name),
-      pk_column.data_type,
+      move |row| extract_record_id(data_type, row),
     )
     .await
     .map_err(|err| RecordError::Internal(err.into()))?,
