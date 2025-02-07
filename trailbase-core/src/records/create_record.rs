@@ -193,15 +193,16 @@ mod test {
   use crate::config::proto::PermissionFlag;
   use crate::records::test_utils::*;
   use crate::records::*;
+  use crate::test::unpack_json_response;
   use crate::util::id_to_b64;
 
   #[tokio::test]
-  async fn test_record_api_create() -> Result<(), anyhow::Error> {
-    let state = test_state(None).await?;
+  async fn test_record_api_create() {
+    let state = test_state(None).await.unwrap();
     let conn = state.conn();
 
-    create_chat_message_app_tables(&state).await?;
-    let room = add_room(conn, "room0").await?;
+    create_chat_message_app_tables(&state).await.unwrap();
+    let room = add_room(conn, "room0").await.unwrap();
     let password = "Secret!1!!";
 
     // Register message table as api with moderator read access.
@@ -220,22 +221,28 @@ mod test {
         ..Default::default()
       },
     )
-    .await?;
+    .await.unwrap();
 
     let user_x_email = "user_x@bar.com";
     let user_x = create_user_for_test(&state, user_x_email, password)
-      .await?
+      .await
+      .unwrap()
       .into_bytes();
-    let user_x_token = login_with_password(&state, user_x_email, password).await?;
+    let user_x_token = login_with_password(&state, user_x_email, password)
+      .await
+      .unwrap();
 
-    add_user_to_room(conn, user_x, room).await?;
+    add_user_to_room(conn, user_x, room).await.unwrap();
 
     let user_y_email = "user_y@test.com";
     let user_y = create_user_for_test(&state, user_y_email, password)
-      .await?
+      .await
+      .unwrap()
       .into_bytes();
 
-    let user_y_token = login_with_password(&state, user_y_email, password).await?;
+    let user_y_token = login_with_password(&state, user_y_email, password)
+      .await
+      .unwrap();
 
     {
       // User X can post to the room, they're a member of
@@ -253,10 +260,39 @@ mod test {
       )
       .await;
       assert!(response.is_ok(), "{response:?}");
+
+      let response: CreateRecordResponse = unpack_json_response(response.unwrap()).await.unwrap();
+
+      assert_eq!(1, response.ids.len());
     }
 
     {
-      // User X can post as a different "_owner".
+      // User X can bulk post to the room, they're a member of
+      let json = |i: usize| {
+        serde_json::json!({
+          "_owner": id_to_b64(&user_x),
+          "room": id_to_b64(&room),
+          "data": format!("user_x bulk message to room {i}"),
+        })
+      };
+
+      let response = create_record_handler(
+        State(state.clone()),
+        Path("messages_api".to_string()),
+        Query(CreateRecordQuery::default()),
+        User::from_auth_token(&state, &user_x_token.auth_token),
+        Either::Json(serde_json::Value::Array(vec![json(0), json(1)])),
+      )
+      .await;
+      assert!(response.is_ok(), "{response:?}");
+
+      let response: CreateRecordResponse = unpack_json_response(response.unwrap()).await.unwrap();
+
+      assert_eq!(2, response.ids.len());
+    }
+
+    {
+      // User X cannot post as a different "_owner".
       let json = serde_json::json!({
         "_owner": id_to_b64(&user_y),
         "room": id_to_b64(&room),
@@ -271,6 +307,43 @@ mod test {
       )
       .await;
       assert!(response.is_err(), "{response:?}");
+    }
+
+    {
+      // Bulk inserts are rolled back in a transaction is second insert fails.
+      let count_before: usize = state
+        .conn()
+        .query_value("SELECT COUNT(*) FROM message", ())
+        .await
+        .unwrap()
+        .unwrap();
+
+      let json = |user_id: &[u8; 16]| {
+        serde_json::json!({
+          "_owner": id_to_b64(user_id),
+          "room": id_to_b64(&room),
+          "data": "user_x bulk message to room",
+        })
+      };
+
+      // This should fail because of user_y as _owner.
+      let response = create_record_handler(
+        State(state.clone()),
+        Path("messages_api".to_string()),
+        Query(CreateRecordQuery::default()),
+        User::from_auth_token(&state, &user_x_token.auth_token),
+        Either::Json(serde_json::Value::Array(vec![json(&user_x), json(&user_y)])),
+      )
+      .await;
+      assert!(response.is_err(), "{response:?}");
+
+      let count_after: usize = state
+        .conn()
+        .query_value("SELECT COUNT(*) FROM message", ())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(count_before, count_after);
     }
 
     {
@@ -289,17 +362,17 @@ mod test {
       .await;
       assert!(response.is_err(), "{response:?}");
     }
-
-    return Ok(());
   }
 
   #[tokio::test]
-  async fn test_record_api_create_integer_id() -> Result<(), anyhow::Error> {
-    let state = test_state(None).await?;
+  async fn test_record_api_create_integer_id() {
+    let state = test_state(None).await.unwrap();
     let conn = state.conn();
 
-    create_chat_message_app_tables_integer(&state).await?;
-    let room = add_room(conn, "room0").await?;
+    create_chat_message_app_tables_integer(&state)
+      .await
+      .unwrap();
+    let room = add_room(conn, "room0").await.unwrap();
     let password = "Secret!1!!";
 
     // Register message table as api with moderator read access.
@@ -318,15 +391,18 @@ mod test {
         ..Default::default()
       },
     )
-    .await?;
+    .await.unwrap();
 
     let user_x_email = "user_x@bar.com";
     let user_x = create_user_for_test(&state, user_x_email, password)
-      .await?
+      .await
+      .unwrap()
       .into_bytes();
-    let user_x_token = login_with_password(&state, user_x_email, password).await?;
+    let user_x_token = login_with_password(&state, user_x_email, password)
+      .await
+      .unwrap();
 
-    add_user_to_room(conn, user_x, room).await?;
+    add_user_to_room(conn, user_x, room).await.unwrap();
 
     {
       // User X can post to the room, they're a member of
@@ -345,7 +421,5 @@ mod test {
       .await;
       assert!(response.is_ok(), "{response:?}");
     }
-
-    return Ok(());
   }
 }
