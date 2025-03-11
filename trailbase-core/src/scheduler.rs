@@ -1,26 +1,110 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use cron::Schedule;
 use futures_util::future::BoxFuture;
 use log::*;
 use parking_lot::Mutex;
 use std::future::Future;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{
+  atomic::{AtomicI64, Ordering},
+  Arc,
+};
 use trailbase_sqlite::params;
 
 use crate::app_state::AppState;
 use crate::constants::{DEFAULT_REFRESH_TOKEN_TTL, LOGS_RETENTION_DEFAULT, SESSION_TABLE};
 
+static TASK_COUNTER: AtomicI64 = AtomicI64::new(0);
+
+type CallbackError = Box<dyn std::error::Error + Sync + Send>;
+type CallbackFunction = dyn Fn() -> BoxFuture<'static, Result<(), CallbackError>> + Sync + Send;
+type LatestCallbackExecution = Option<(DateTime<Utc>, Option<CallbackError>)>;
+
+pub trait CallbackResultTrait {
+  fn into_result(self) -> Result<(), CallbackError>;
+}
+
+impl CallbackResultTrait for () {
+  fn into_result(self) -> Result<(), CallbackError> {
+    return Ok(());
+  }
+}
+
+impl<T: Into<CallbackError>> CallbackResultTrait for Result<(), T> {
+  fn into_result(self) -> Result<(), CallbackError> {
+    return self.map_err(|e| e.into());
+  }
+}
+
 #[allow(unused)]
 struct Task {
+  id: i64,
   name: String,
-  schedule: cron::Schedule,
-  callback: Arc<dyn Fn() -> BoxFuture<'static, ()> + Sync + Send>,
-  handle: tokio::task::AbortHandle,
+  schedule: Schedule,
+  callback: Arc<CallbackFunction>,
+
+  handle: Option<tokio::task::AbortHandle>,
+  latest: Arc<Mutex<LatestCallbackExecution>>,
 }
 
 pub struct TaskRegistry {
   tasks: Mutex<Vec<Task>>,
+}
+
+impl Task {
+  fn new(name: String, schedule: Schedule, callback: Arc<CallbackFunction>) -> Self {
+    return Task {
+      id: TASK_COUNTER.fetch_add(1, Ordering::SeqCst),
+      name,
+      schedule,
+      callback,
+      handle: None,
+      latest: Arc::new(Mutex::new(None)),
+    };
+  }
+
+  fn start(&mut self) {
+    let name = self.name.clone();
+    let callback = self.callback.clone();
+    let schedule = self.schedule.clone();
+    let latest = self.latest.clone();
+
+    let handle = tokio::spawn(async move {
+      loop {
+        let now = Utc::now();
+        let Some(next) = schedule.upcoming(Utc).next() else {
+          break;
+        };
+        let Ok(duration) = (next - now).to_std() else {
+          log::warn!("Invalid duration for '{name}': {next:?}");
+          continue;
+        };
+
+        tokio::time::sleep(duration).await;
+
+        let result = (*callback)().await;
+        *latest.lock() = Some((Utc::now(), result.err()));
+      }
+
+      log::info!("Exited task: '{name}'");
+    });
+
+    self.handle = Some(handle.abort_handle());
+  }
+
+  fn stop(&mut self) {
+    if let Some(ref handle) = self.handle {
+      handle.abort();
+    }
+    self.handle = None;
+  }
+
+  fn running(&self) -> bool {
+    if let Some(ref handle) = self.handle {
+      return !handle.is_finished();
+    }
+    return false;
+  }
 }
 
 impl TaskRegistry {
@@ -30,55 +114,33 @@ impl TaskRegistry {
     };
   }
 
-  pub fn add_task<F, Fut>(&self, name: impl Into<String>, schedule: cron::Schedule, f: F)
+  pub fn add_task<O, F, Fut>(&self, name: impl Into<String>, schedule: Schedule, f: F)
   where
     F: 'static + Sync + Send + Fn() -> Fut,
-    Fut: Sync + Send + Future,
+    Fut: Sync + Send + Future<Output = O>,
+    O: CallbackResultTrait,
   {
     let fun = Arc::new(f);
-    let callback: Arc<dyn Fn() -> BoxFuture<'static, ()> + Sync + Send> = Arc::new(move || {
+    let callback: Arc<CallbackFunction> = Arc::new(move || {
       let fun = fun.clone();
       return Box::pin(async move {
-        fun().await;
+        return fun().await.into_result();
       });
     });
 
-    let name: String = name.into();
-    let name_clone = name.clone();
-    let callback_clone = callback.clone();
-    let schedule_clone = schedule.clone();
-    let handle = tokio::spawn(async move {
-      loop {
-        let Some(next) = schedule_clone.upcoming(Utc).next() else {
-          break;
-        };
-        let Ok(duration) = (next - Utc::now()).to_std() else {
-          log::warn!("Invalid duration for '{name_clone}': {next:?}");
-          continue;
-        };
-
-        tokio::time::sleep(duration).await;
-        (*callback_clone)().await;
-      }
-
-      log::info!("Exited task: '{name_clone}'");
-    })
-    .abort_handle();
-
-    self.tasks.lock().push(Task {
-      name,
-      schedule,
-      callback,
-      handle,
+    self.tasks.lock().push({
+      let mut task = Task::new(name.into(), schedule, callback);
+      task.start();
+      task
     });
   }
 }
 
 impl Drop for TaskRegistry {
   fn drop(&mut self) {
-    let tasks = self.tasks.lock();
-    for t in tasks.iter() {
-      t.handle.abort();
+    let mut tasks = self.tasks.lock();
+    for t in tasks.iter_mut() {
+      t.stop();
     }
   }
 }
@@ -125,8 +187,8 @@ impl Drop for AbortOnDrop {
 pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
   let mut tasks = AbortOnDrop::default();
 
-  //               sec  min   hour   day of month   month   day of week   year
-  let expression = "0    *     *         *            *         *          *";
+  //               sec  min   hour   day of month   month   day of week  year
+  let expression = "0    *     *         *            *         *         *";
   app_state.tasks().add_task(
     "Alive",
     Schedule::from_str(expression).expect("startup"),
@@ -229,10 +291,12 @@ pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
       let conn = conn.clone();
 
       return async move {
-        match conn.execute("PRAGMA optimize", ()).await {
-          Ok(_) => info!("Successfully ran query optimizer"),
-          Err(err) => warn!("query optimizer failed: {err}"),
-        };
+        conn.execute("PRAGMA optimize", ()).await.map_err(|err| {
+          warn!("query optimizer failed: {err}");
+          return err;
+        })?;
+
+        Ok::<(), trailbase_sqlite::Error>(())
       };
     },
   );
@@ -244,24 +308,47 @@ pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
 mod tests {
   use super::*;
 
-  use cron::Schedule;
-  use std::str::FromStr;
+  #[test]
+  fn test_cron() {
+    //               sec      min   hour   day of month   month   day of week  year
+    let expression = "*/100   *     *         *            *         *          *";
+    assert!(Schedule::from_str(expression).is_err());
+
+    let expression = "*/40    *     *         *            *         *          *";
+    Schedule::from_str(expression).unwrap();
+  }
 
   #[tokio::test]
   async fn test_scheduler() {
+    // NOTE: Cron is time and not interval based, i.e. something like every 100s is not
+    // representable in a single cron spec. Make sure that our cron parser detects that proerly,
+    // e.g. croner does not and will just produce buggy intervals.
+    // NOTE: Interval-based scheduling is generally problematic because it drifts. For something
+    // like a backup you certainly want to control when and not how often it happens (e.g. at
+    // night).
     let registry = TaskRegistry::new();
 
     let (sender, receiver) = async_channel::unbounded::<()>();
 
-    //               sec  min   hour   day of month   month   day of week   year
-    let expression = "*    *     *         *            *         *          *";
-    registry.add_task("Foo", Schedule::from_str(expression).unwrap(), move || {
-      let sender = sender.clone();
-      return async move {
-        sender.send(()).await.unwrap();
-      };
-    });
+    //               sec  min   hour   day of month   month   day of week  year
+    let expression = "*    *     *         *            *         *         *";
+    registry.add_task(
+      "Test Task",
+      Schedule::from_str(expression).unwrap(),
+      move || {
+        let sender = sender.clone();
+        return async move {
+          sender.send(()).await.unwrap();
+          Err("result")
+        };
+      },
+    );
 
     receiver.recv().await.unwrap();
+
+    let tasks = registry.tasks.lock();
+    let latest = tasks[0].latest.lock();
+    let (_timestamp, err) = latest.as_ref().unwrap();
+    assert_eq!(err.as_ref().unwrap().to_string(), "result");
   }
 }
