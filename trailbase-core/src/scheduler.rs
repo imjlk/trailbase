@@ -1,10 +1,87 @@
 use chrono::{Duration, Utc};
+use cron::Schedule;
+use futures_util::future::BoxFuture;
 use log::*;
+use parking_lot::Mutex;
 use std::future::Future;
+use std::str::FromStr;
+use std::sync::Arc;
 use trailbase_sqlite::params;
 
 use crate::app_state::AppState;
 use crate::constants::{DEFAULT_REFRESH_TOKEN_TTL, LOGS_RETENTION_DEFAULT, SESSION_TABLE};
+
+#[allow(unused)]
+struct Task {
+  name: String,
+  schedule: cron::Schedule,
+  callback: Arc<dyn Fn() -> BoxFuture<'static, ()> + Sync + Send>,
+  handle: tokio::task::AbortHandle,
+}
+
+pub struct TaskRegistry {
+  tasks: Mutex<Vec<Task>>,
+}
+
+impl TaskRegistry {
+  pub fn new() -> Self {
+    return TaskRegistry {
+      tasks: Mutex::new(Vec::new()),
+    };
+  }
+
+  pub fn add_task<F, Fut>(&self, name: impl Into<String>, schedule: cron::Schedule, f: F)
+  where
+    F: 'static + Sync + Send + Fn() -> Fut,
+    Fut: Sync + Send + Future,
+  {
+    let fun = Arc::new(f);
+    let callback: Arc<dyn Fn() -> BoxFuture<'static, ()> + Sync + Send> = Arc::new(move || {
+      let fun = fun.clone();
+      return Box::pin(async move {
+        fun().await;
+      });
+    });
+
+    let name: String = name.into();
+    let name_clone = name.clone();
+    let callback_clone = callback.clone();
+    let schedule_clone = schedule.clone();
+    let handle = tokio::spawn(async move {
+      loop {
+        let Some(next) = schedule_clone.upcoming(Utc).next() else {
+          break;
+        };
+        let Ok(duration) = (next - Utc::now()).to_std() else {
+          log::warn!("Invalid duration for '{name_clone}': {next:?}");
+          continue;
+        };
+
+        tokio::time::sleep(duration).await;
+        (*callback_clone)().await;
+      }
+
+      log::info!("Exited task: '{name_clone}'");
+    })
+    .abort_handle();
+
+    self.tasks.lock().push(Task {
+      name,
+      schedule,
+      callback,
+      handle,
+    });
+  }
+}
+
+impl Drop for TaskRegistry {
+  fn drop(&mut self) {
+    let tasks = self.tasks.lock();
+    for t in tasks.iter() {
+      t.handle.abort();
+    }
+  }
+}
 
 #[derive(Default)]
 pub struct AbortOnDrop {
@@ -48,11 +125,15 @@ impl Drop for AbortOnDrop {
 pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
   let mut tasks = AbortOnDrop::default();
 
-  tasks
-    .add_periodic_task(Duration::seconds(60), || async {
+  //               sec  min   hour   day of month   month   day of week   year
+  let expression = "0    *     *         *            *         *          *";
+  app_state.tasks().add_task(
+    "Alive",
+    Schedule::from_str(expression).expect("startup"),
+    || async {
       info!("alive");
-    })
-    .expect("startup");
+    },
+  );
 
   // Backup job.
   let conn = app_state.conn().clone();
@@ -66,7 +147,7 @@ pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
         let conn = conn.clone();
         let backup_file = backup_file.clone();
 
-        async move {
+        return async move {
           let result = conn
             .call(|conn| {
               return Ok(conn.backup(
@@ -81,7 +162,7 @@ pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
             Ok(_) => info!("Backup complete"),
             Err(err) => error!("Backup failed: {err}"),
           };
-        }
+        };
       })
       .expect("startup");
   }
@@ -141,18 +222,46 @@ pub(super) fn start_periodic_tasks(app_state: &AppState) -> AbortOnDrop {
 
   // Optimizer
   let conn = app_state.conn().clone();
-  tasks
-    .add_periodic_task(Duration::hours(24), move || {
+  app_state.tasks().add_task(
+    "Optimizer",
+    Schedule::from_str("@daily").expect("startup"),
+    move || {
       let conn = conn.clone();
 
-      tokio::spawn(async move {
+      return async move {
         match conn.execute("PRAGMA optimize", ()).await {
           Ok(_) => info!("Successfully ran query optimizer"),
           Err(err) => warn!("query optimizer failed: {err}"),
         };
-      })
-    })
-    .expect("startup");
+      };
+    },
+  );
 
   return tasks;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  use cron::Schedule;
+  use std::str::FromStr;
+
+  #[tokio::test]
+  async fn test_scheduler() {
+    let registry = TaskRegistry::new();
+
+    let (sender, receiver) = async_channel::unbounded::<()>();
+
+    //               sec  min   hour   day of month   month   day of week   year
+    let expression = "*    *     *         *            *         *          *";
+    registry.add_task("Foo", Schedule::from_str(expression).unwrap(), move || {
+      let sender = sender.clone();
+      return async move {
+        sender.send(()).await.unwrap();
+      };
+    });
+
+    receiver.recv().await.unwrap();
+  }
 }

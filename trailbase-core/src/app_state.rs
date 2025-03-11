@@ -12,6 +12,7 @@ use crate::email::Mailer;
 use crate::js::RuntimeHandle;
 use crate::records::subscribe::SubscriptionManager;
 use crate::records::RecordApi;
+use crate::scheduler::TaskRegistry;
 use crate::table_metadata::TableMetadataCache;
 use crate::value_notifier::{Computed, ValueNotifier};
 
@@ -37,6 +38,8 @@ struct InternalState {
   table_metadata: TableMetadataCache,
   subscription_manager: SubscriptionManager,
   object_store: Box<dyn ObjectStore + Send + Sync>,
+
+  tasks: TaskRegistry,
 
   runtime: RuntimeHandle,
 
@@ -118,6 +121,7 @@ impl AppState {
         table_metadata: args.table_metadata.clone(),
         subscription_manager: SubscriptionManager::new(args.conn, args.table_metadata, record_apis),
         object_store: args.object_store,
+        tasks: TaskRegistry::new(),
         runtime,
         #[cfg(test)]
         cleanup: vec![],
@@ -173,6 +177,10 @@ impl AppState {
 
   pub(crate) fn objectstore(&self) -> &(dyn ObjectStore + Send + Sync) {
     return &*self.state.object_store;
+  }
+
+  pub(crate) fn tasks(&self) -> &TaskRegistry {
+    return &self.state.tasks;
   }
 
   pub(crate) fn get_oauth_provider(&self, name: &str) -> Option<Arc<OAuthProviderType>> {
@@ -426,6 +434,7 @@ pub async fn test_state(options: Option<TestStateOptions>) -> anyhow::Result<App
       table_metadata: table_metadata.clone(),
       subscription_manager: SubscriptionManager::new(conn, table_metadata, record_apis),
       object_store,
+      tasks: TaskRegistry::new(),
       runtime,
       cleanup: vec![Box::new(temp_dir)],
     }),
