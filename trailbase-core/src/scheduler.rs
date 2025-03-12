@@ -39,18 +39,18 @@ impl<T: Into<CallbackError>> CallbackResultTrait for Result<(), T> {
 }
 
 #[allow(unused)]
-struct Task {
-  id: i32,
-  name: String,
-  schedule: Schedule,
-  callback: Arc<CallbackFunction>,
+pub struct Task {
+  pub id: i32,
+  pub name: String,
+  pub schedule: Schedule,
+  pub(crate) callback: Arc<CallbackFunction>,
 
   handle: Option<tokio::task::AbortHandle>,
   latest: Arc<Mutex<LatestCallbackExecution>>,
 }
 
 pub struct TaskRegistry {
-  tasks: Mutex<HashMap<i32, Task>>,
+  pub(crate) tasks: Mutex<HashMap<i32, Task>>,
 }
 
 impl Task {
@@ -94,18 +94,15 @@ impl Task {
     self.handle = Some(handle.abort_handle());
   }
 
+  async fn run_now(&self) -> Result<(), CallbackError> {
+    return (self.callback)().await;
+  }
+
   fn stop(&mut self) {
     if let Some(ref handle) = self.handle {
       handle.abort();
     }
     self.handle = None;
-  }
-
-  fn running(&self) -> bool {
-    if let Some(ref handle) = self.handle {
-      return !handle.is_finished();
-    }
-    return false;
   }
 }
 
