@@ -168,7 +168,7 @@ impl Server {
   }
 
   pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _raii_tasks = scheduler::start_periodic_tasks(&self.state);
+    scheduler::start_periodic_tasks(&self.state)?;
 
     // NOTE: We panic if  a key/cert that was explicitly specified cannot be loaded.
     let data_dir = self.state.data_dir();
