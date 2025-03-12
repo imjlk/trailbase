@@ -112,7 +112,7 @@ message SystemCronJob {
   optional string spec = 2;
 
   /// Disable the system job.
-  optional bool disable = 3;
+  optional bool disable_job = 3;
 }
 
 message CronConfig {

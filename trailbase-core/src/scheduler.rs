@@ -10,11 +10,11 @@ use std::sync::{
   atomic::{AtomicI32, Ordering},
   Arc,
 };
-use trailbase_sqlite::params;
+use trailbase_sqlite::{params, Connection};
 
-use crate::app_state::AppState;
-use crate::config::proto::{Config, SystemCronJobId};
+use crate::config::proto::{Config, SystemCronJob, SystemCronJobId};
 use crate::constants::{DEFAULT_REFRESH_TOKEN_TTL, LOGS_RETENTION_DEFAULT, SESSION_TABLE};
+use crate::DataDir;
 
 type CallbackError = Box<dyn std::error::Error + Sync + Send>;
 type CallbackFunction = dyn Fn() -> BoxFuture<'static, Result<(), CallbackError>> + Sync + Send;
@@ -116,32 +116,19 @@ impl TaskRegistry {
     };
   }
 
-  pub fn add_task<O, F, Fut>(
+  pub fn add_task(
     &self,
     id: Option<i32>,
     name: impl Into<String>,
     schedule: Schedule,
-    f: F,
-  ) -> bool
-  where
-    F: 'static + Sync + Send + Fn() -> Fut,
-    Fut: Sync + Send + Future<Output = O>,
-    O: CallbackResultTrait,
-  {
-    let fun = Arc::new(f);
-    let callback: Arc<CallbackFunction> = Arc::new(move || {
-      let fun = fun.clone();
-      return Box::pin(async move {
-        return fun().await.into_result();
-      });
-    });
-
+    callback: Box<CallbackFunction>,
+  ) -> bool {
     let id = id.unwrap_or_else(|| TASK_COUNTER.fetch_add(1, Ordering::SeqCst));
     return match self.tasks.lock().entry(id) {
       Entry::Occupied(_) => false,
       Entry::Vacant(entry) => {
         let task = {
-          let mut task = Task::new(id, name.into(), schedule, callback);
+          let mut task = Task::new(id, name.into(), schedule, callback.into());
           task.start();
           task
         };
@@ -163,182 +150,241 @@ impl Drop for TaskRegistry {
   }
 }
 
-pub fn add_system_cron_job<O, F, Fut>(
-  state: &AppState,
-  id: SystemCronJobId,
-  name: &'static str,
-  spec: &'static str,
-  f: F,
-) -> Result<(), CallbackError>
+pub fn build_callback<O, F, Fut>(f: F) -> Box<CallbackFunction>
 where
   F: 'static + Sync + Send + Fn() -> Fut,
   Fut: Sync + Send + Future<Output = O>,
   O: CallbackResultTrait,
 {
-  let (spec, disabled) = state.access_config(|c: &Config| {
-    for job in &c.cron.system_jobs {
-      if let Some(job_id) = job.id {
-        if job_id == id as i32 {
-          return (
-            job.spec.clone().unwrap_or(spec.to_string()),
-            job.disable.unwrap_or(false),
-          );
-        }
-      }
-    }
-    return (spec.to_string(), false);
+  let fun = Arc::new(f);
+
+  return Box::new(move || {
+    let fun = fun.clone();
+
+    return Box::pin(async move {
+      return fun().await.into_result();
+    });
   });
-
-  if disabled {
-    return Ok(());
-  }
-
-  let schedule = Schedule::from_str(&spec)?;
-
-  let success = state.tasks().add_task(Some(id as i32), name, schedule, f);
-
-  if !success {
-    return Err(format!("Duplicate job for: {name}").into());
-  }
-
-  return Ok(());
 }
 
-pub(super) fn start_periodic_tasks(app_state: &AppState) -> Result<(), CallbackError> {
-  add_system_cron_job(
-    app_state,
-    SystemCronJobId::Heartbeat,
-    "Alive",
-    // sec  min   hour   day of month   month   day of week  year
-    "   17   *     *         *            *         *         *",
-    || async {
-      info!("alive");
+struct Job {
+  name: &'static str,
+  default: SystemCronJob,
+  callback: Box<CallbackFunction>,
+}
+
+fn build_job(
+  id: SystemCronJobId,
+  data_dir: &DataDir,
+  config: &Config,
+  conn: &Connection,
+  logs_conn: &Connection,
+) -> Job {
+  return match id {
+    SystemCronJobId::Undefined => Job {
+      name: "",
+      default: SystemCronJob::default(),
+      #[allow(unreachable_code)]
+      callback: build_callback(move || {
+        panic!("undefined cron job");
+        async {}
+      }),
     },
-  )?;
-
-  // Backup job.
-  //
-  // FIXME: Backups are currenty periodic but that doesn't make any sense. This should be
-  // time-based, i.e. cron, to avoid drift and allow specific times.
-  // let conn = app_state.conn().clone();
-  // let backup_file = app_state.data_dir().backup_path().join("backup.db");
-  // if let Some(backup_interval) = app_state
-  //   .access_config(|c| c.server.backup_interval_sec)
-  //   .map(Duration::seconds)
-  // {
-  //   tasks
-  //     .add_periodic_task(backup_interval, move || {
-  //       let conn = conn.clone();
-  //       let backup_file = backup_file.clone();
-  //
-  //       return async move {
-  //         let result = conn
-  //           .call(|conn| {
-  //             return Ok(conn.backup(
-  //               rusqlite::DatabaseName::Main,
-  //               backup_file,
-  //               /* progress= */ None,
-  //             )?);
-  //           })
-  //           .await;
-  //
-  //         match result {
-  //           Ok(_) => info!("Backup complete"),
-  //           Err(err) => error!("Backup failed: {err}"),
-  //         };
-  //       };
-  //     })
-  //     .expect("startup");
-  // }
-
-  // Logs cleaner.
-  let retention = app_state
-    .access_config(|c| c.server.logs_retention_sec)
-    .map_or(LOGS_RETENTION_DEFAULT, Duration::seconds);
-
-  if !retention.is_zero() {
-    let logs_conn = app_state.logs_conn().clone();
-
-    add_system_cron_job(
-      app_state,
-      SystemCronJobId::LogCleaner,
-      "Logs Cleanup",
-      "@hourly",
-      move || {
-        let logs_conn = logs_conn.clone();
-
-        return async move {
-          let timestamp = (Utc::now() - retention).timestamp();
-          logs_conn
-            .execute("DELETE FROM _logs WHERE created < $1", params!(timestamp))
-            .await
-            .map_err(|err| {
-              warn!("Periodic logs cleanup failed: {err}");
-              err
-            })?;
-
-          Ok::<(), trailbase_sqlite::Error>(())
-        };
-      },
-    )?;
-  }
-
-  // Refresh token cleaner.
-  let state = app_state.clone();
-  add_system_cron_job(
-    app_state,
-    SystemCronJobId::AuthCleaner,
-    "Auth Cleanup",
-    "@hourly",
-    move || {
-      let state = state.clone();
-
-      return async move {
-        let refresh_token_ttl = state
-          .access_config(|c| c.auth.refresh_token_ttl_sec)
-          .map_or(DEFAULT_REFRESH_TOKEN_TTL, Duration::seconds);
-
-        let timestamp = (Utc::now() - refresh_token_ttl).timestamp();
-
-        state
-          .user_conn()
-          .execute(
-            &format!("DELETE FROM '{SESSION_TABLE}' WHERE updated < $1"),
-            params!(timestamp),
-          )
-          .await
-          .map_err(|err| {
-            warn!("Periodic session cleanup failed: {err}");
-            err
-          })?;
-
-        Ok::<(), trailbase_sqlite::Error>(())
-      };
-    },
-  )?;
-
-  // Optimizer
-  let conn = app_state.conn().clone();
-  add_system_cron_job(
-    app_state,
-    SystemCronJobId::QueryOptimizer,
-    "Query Optimizer",
-    "@daily",
-    move || {
+    SystemCronJobId::Backup => {
+      let backup_file = data_dir.backup_path().join("backup.db");
       let conn = conn.clone();
 
-      return async move {
-        conn.execute("PRAGMA optimize", ()).await.map_err(|err| {
-          warn!("Periodic query optimizer failed: {err}");
-          return err;
-        })?;
+      Job {
+        name: "Backup",
+        default: SystemCronJob {
+          id: Some(id as i32),
+          spec: Some("@daily".into()),
+          disable_job: Some(true),
+        },
+        callback: build_callback(move || {
+          let conn = conn.clone();
+          let backup_file = backup_file.clone();
 
-        Ok::<(), trailbase_sqlite::Error>(())
-      };
+          return async move {
+            conn
+              .call(|conn| {
+                return Ok(conn.backup(
+                  rusqlite::DatabaseName::Main,
+                  backup_file,
+                  /* progress= */ None,
+                )?);
+              })
+              .await
+              .map_err(|err| {
+                error!("Backup failed: {err}");
+                err
+              })?;
+
+            Ok::<(), trailbase_sqlite::Error>(())
+          };
+        }),
+      }
+    }
+    SystemCronJobId::Heartbeat => Job {
+      name: "Heartbeat",
+      default: SystemCronJob {
+        id: Some(id as i32),
+        //         sec  min   hour   day of month   month   day of week  year
+        spec: Some("17   *     *         *            *         *         *".into()),
+        disable_job: Some(false),
+      },
+      callback: build_callback(|| async {
+        info!("alive");
+      }),
     },
-  )?;
+    SystemCronJobId::LogCleaner => {
+      let logs_conn = logs_conn.clone();
+      let retention = config
+        .server
+        .logs_retention_sec
+        .map_or(LOGS_RETENTION_DEFAULT, Duration::seconds);
 
-  return Ok(());
+      Job {
+        name: "Logs Cleanup",
+        default: SystemCronJob {
+          id: Some(id as i32),
+          spec: Some("@hourly".into()),
+          disable_job: Some(false),
+        },
+        callback: build_callback(move || {
+          let logs_conn = logs_conn.clone();
+
+          return async move {
+            let timestamp = (Utc::now() - retention).timestamp();
+            logs_conn
+              .execute("DELETE FROM _logs WHERE created < $1", params!(timestamp))
+              .await
+              .map_err(|err| {
+                warn!("Periodic logs cleanup failed: {err}");
+                err
+              })?;
+
+            Ok::<(), trailbase_sqlite::Error>(())
+          };
+        }),
+      }
+    }
+    SystemCronJobId::AuthCleaner => {
+      let user_conn = conn.clone();
+      let refresh_token_ttl = config
+        .auth
+        .refresh_token_ttl_sec
+        .map_or(DEFAULT_REFRESH_TOKEN_TTL, Duration::seconds);
+
+      Job {
+        name: "Auth Cleanup",
+        default: SystemCronJob {
+          id: Some(id as i32),
+          spec: Some("@hourly".into()),
+          disable_job: Some(false),
+        },
+        callback: build_callback(move || {
+          let user_conn = user_conn.clone();
+
+          return async move {
+            let timestamp = (Utc::now() - refresh_token_ttl).timestamp();
+
+            user_conn
+              .execute(
+                &format!("DELETE FROM '{SESSION_TABLE}' WHERE updated < $1"),
+                params!(timestamp),
+              )
+              .await
+              .map_err(|err| {
+                warn!("Periodic session cleanup failed: {err}");
+                err
+              })?;
+
+            Ok::<(), trailbase_sqlite::Error>(())
+          };
+        }),
+      }
+    }
+    SystemCronJobId::QueryOptimizer => {
+      let conn = conn.clone();
+
+      Job {
+        name: "Query Optimizer",
+        default: SystemCronJob {
+          id: Some(id as i32),
+          spec: Some("@daily".into()),
+          disable_job: Some(false),
+        },
+        callback: build_callback(move || {
+          let conn = conn.clone();
+
+          return async move {
+            conn.execute("PRAGMA optimize", ()).await.map_err(|err| {
+              warn!("Periodic query optimizer failed: {err}");
+              return err;
+            })?;
+
+            Ok::<(), trailbase_sqlite::Error>(())
+          };
+        }),
+      }
+    }
+  };
+}
+
+pub fn build_task_registry_from_config(
+  config: &Config,
+  data_dir: &DataDir,
+  conn: &Connection,
+  logs_conn: &Connection,
+) -> Result<TaskRegistry, CallbackError> {
+  let jobs = [
+    SystemCronJobId::Backup,
+    SystemCronJobId::Heartbeat,
+    SystemCronJobId::LogCleaner,
+    SystemCronJobId::AuthCleaner,
+    SystemCronJobId::QueryOptimizer,
+  ];
+
+  let tasks = TaskRegistry::new();
+  for job_id in jobs {
+    let Job {
+      name,
+      default,
+      callback,
+    } = build_job(job_id, data_dir, config, conn, logs_conn);
+
+    let config = config
+      .cron
+      .system_jobs
+      .iter()
+      .find(|j| j.id == Some(job_id as i32))
+      .unwrap_or(&default);
+
+    if config.disable_job == Some(true) {
+      log::debug!("Job '{name}' disabled. Skipping");
+      continue;
+    }
+
+    let spec = config
+      .spec
+      .as_ref()
+      .unwrap_or_else(|| default.spec.as_ref().expect("startup"));
+
+    match Schedule::from_str(spec) {
+      Ok(schedule) => {
+        let success = tasks.add_task(Some(job_id as i32), name, schedule, callback);
+        if !success {
+          log::error!("Duplicate job definition for '{name}'");
+        }
+      }
+      Err(err) => {
+        log::error!("Invalid time spec for '{name}': {err}");
+      }
+    };
+  }
+
+  return Ok(tasks);
 }
 
 #[cfg(test)]
@@ -373,13 +419,13 @@ mod tests {
       None,
       "Test Task",
       Schedule::from_str(expression).unwrap(),
-      move || {
+      build_callback(move || {
         let sender = sender.clone();
         return async move {
           sender.send(()).await.unwrap();
           Err("result")
         };
-      },
+      }),
     );
 
     receiver.recv().await.unwrap();
