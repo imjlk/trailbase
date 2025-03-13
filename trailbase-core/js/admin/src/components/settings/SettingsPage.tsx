@@ -30,7 +30,7 @@ import { ConfirmCloseDialog } from "@/components/SafeSheet";
 import { AuthSettings } from "@/components/settings/AuthSettings";
 import { SchemaSettings } from "@/components/settings/SchemaSettings";
 import { EmailSettings } from "@/components/settings/EmailSettings";
-import { TaskSettings } from "@/components/settings/TaskSettings";
+import { JobSettings } from "@/components/settings/JobSettings";
 import { SplitView } from "@/components/SplitView";
 import { IconButton } from "@/components/IconButton";
 
@@ -120,7 +120,7 @@ function ServerSettings(props: CommonProps) {
                   ),
                   info: (
                     <p>
-                      A background task periodically cleans up logs older than
+                      A background job periodically cleans up logs older than
                       above retention period. Setting the retention to zero
                       turns off the cleanup and logs will be retained
                       indefinitely.
@@ -465,7 +465,7 @@ const sites = [
   {
     route: "jobs",
     label: "Jobs",
-    child: TaskSettings,
+    child: JobSettings,
   },
 ] as const;
 

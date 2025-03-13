@@ -1,13 +1,12 @@
 use axum::{extract::State, Json};
-use log::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use ts_rs::TS;
 
 use crate::admin::AdminError as Error;
 use crate::AppState;
 
 #[derive(Debug, Serialize, TS)]
-pub struct Task {
+pub struct Job {
   pub id: i32,
   pub name: String,
   pub schedule: String,
@@ -15,24 +14,24 @@ pub struct Task {
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
-pub struct ListTasksResponse {
-  pub tasks: Vec<Task>,
+pub struct ListJobsResponse {
+  pub jobs: Vec<Job>,
 }
 
-pub async fn list_tasks_handler(
+pub async fn list_jobs_handler(
   State(state): State<AppState>,
-) -> Result<Json<ListTasksResponse>, Error> {
-  let tasks: Vec<_> = state
-    .tasks()
-    .tasks
+) -> Result<Json<ListJobsResponse>, Error> {
+  let jobs: Vec<_> = state
+    .jobs()
+    .jobs
     .lock()
     .values()
-    .map(|t| Task {
+    .map(|t| Job {
       id: t.id,
       name: t.name.clone(),
       schedule: t.schedule.to_string(),
     })
     .collect();
 
-  return Ok(Json(ListTasksResponse { tasks }));
+  return Ok(Json(ListJobsResponse { jobs }));
 }

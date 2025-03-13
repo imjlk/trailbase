@@ -16,30 +16,32 @@ import {
 import { TextField, TextFieldInput } from "@/components/ui/text-field";
 
 import { type FieldApiT, notEmptyValidator } from "@/components/FormFields";
-import { Config, CronConfig, SystemCronJob } from "@proto/config";
+import { Config, JobsConfig, SystemJob } from "@proto/config";
 import { createConfigQuery, setConfig } from "@/lib/config";
-import { listTasks } from "@/lib/tasks";
-import type { Task } from "@bindings/Task";
+import { listJobs } from "@/lib/jobs";
+import type { Job } from "@bindings/Job";
 
 type CronJobProxy = {
   /// Set to false if the loaded config contained the job.
   default: boolean;
-  initial: SystemCronJob;
-  config: SystemCronJob;
-  task?: Task;
+  initialConfig: SystemJob;
+  config: SystemJob;
+  job?: Job;
 };
 
 type FormProxy = {
   jobs: CronJobProxy[];
 };
 
-function equal(a: SystemCronJob, b: SystemCronJob): boolean {
-  return a.disableJob === b.disableJob && a.spec === b.spec && a.id === b.id;
+function equal(a: SystemJob, b: SystemJob): boolean {
+  return (
+    a.disabled === b.disabled && a.schedule === b.schedule && a.id === b.id
+  );
 }
 
 function buildFormProxy(
-  config: CronConfig | undefined,
-  tasks: Task[],
+  config: JobsConfig | undefined,
+  jobs: Job[],
 ): FormProxy {
   const result = new Map<number, CronJobProxy>();
   if (config) {
@@ -48,25 +50,25 @@ function buildFormProxy(
       if (id) {
         result.set(id, {
           default: false,
-          initial: job,
+          initialConfig: job,
           config: { ...job },
         });
       }
     }
   }
 
-  for (const task of tasks) {
-    const d: SystemCronJob = {
-      id: task.id,
-      spec: task.schedule,
+  for (const job of jobs) {
+    const d: SystemJob = {
+      id: job.id,
+      schedule: job.schedule,
     };
-    const entry: CronJobProxy = result.get(task.id) ?? {
+    const entry: CronJobProxy = result.get(job.id) ?? {
       default: true,
-      initial: d,
+      initialConfig: d,
       config: { ...d },
     };
-    entry.task = task;
-    result.set(task.id, entry);
+    entry.job = job;
+    result.set(job.id, entry);
   }
 
   return {
@@ -74,14 +76,14 @@ function buildFormProxy(
   };
 }
 
-function extractConfig(proxy: FormProxy): CronConfig {
-  const systemJobs: SystemCronJob[] = [];
+function extractConfig(proxy: FormProxy): JobsConfig {
+  const systemJobs: SystemJob[] = [];
 
   for (const entry of proxy.jobs) {
     // Only add entries that were part of the original config or have changed from the initial default.
     if (entry.default === false) {
       systemJobs.push(entry.config);
-    } else if (!equal(entry.initial, entry.config)) {
+    } else if (!equal(entry.initialConfig, entry.config)) {
       systemJobs.push(entry.config);
     }
   }
@@ -91,15 +93,15 @@ function extractConfig(proxy: FormProxy): CronConfig {
   };
 }
 
-export function TaskSettingsImpl(props: {
+export function JobSettingsImpl(props: {
   markDirty: () => void;
   postSubmit: () => void;
   config: Config;
-  tasks: Task[];
-  refetchTasks: () => void;
+  jobs: Job[];
+  refetchJobs: () => void;
 }) {
   const form = createForm(() => ({
-    defaultValues: buildFormProxy(props.config.cron, props.tasks),
+    defaultValues: buildFormProxy(props.config.jobs, props.jobs),
     onSubmit: async ({ value }: { value: FormProxy }) => {
       const newConfig = {
         ...props.config,
@@ -135,16 +137,16 @@ export function TaskSettingsImpl(props: {
         </TableHeader>
 
         <TableBody>
-          <For each={props.tasks}>
-            {(task: Task, index: () => number) => (
+          <For each={props.jobs}>
+            {(job: Job, index: () => number) => (
               <TableRow>
-                <TableCell>{task.id}</TableCell>
+                <TableCell>{job.id}</TableCell>
 
-                <TableCell>{task.name}</TableCell>
+                <TableCell>{job.name}</TableCell>
 
                 <TableCell>
                   <form.Field
-                    name={`jobs[${index()}].config.spec`}
+                    name={`jobs[${index()}].config.schedule`}
                     validators={notEmptyValidator()}
                   >
                     {(field: () => FieldApiT<string | undefined>) => {
@@ -177,7 +179,7 @@ export function TaskSettingsImpl(props: {
                   <div class="flex h-full items-center">
                     <IconButton
                       onClick={() => {
-                        props.refetchTasks();
+                        props.refetchJobs();
                       }}
                     >
                       <TbPlayerPlay size={20} />
@@ -218,24 +220,24 @@ export function TaskSettingsImpl(props: {
   );
 }
 
-export function TaskSettings(props: {
+export function JobSettings(props: {
   markDirty: () => void;
   postSubmit: () => void;
 }) {
   const config = createConfigQuery();
-  const [taskList, { refetch }] = createResource(listTasks);
+  const [jobList, { refetch }] = createResource(listJobs);
 
   return (
     <Switch fallback="Loading...">
-      <Match when={taskList.error}>{taskList.error}</Match>
+      <Match when={jobList.error}>{jobList.error}</Match>
       <Match when={config.error}>{JSON.stringify(config.error)}</Match>
 
-      <Match when={taskList() && config.data?.config}>
-        <TaskSettingsImpl
+      <Match when={jobList() && config.data?.config}>
+        <JobSettingsImpl
           {...props}
           config={config.data!.config!}
-          tasks={taskList()?.tasks ?? []}
-          refetchTasks={refetch}
+          jobs={jobList()?.jobs ?? []}
+          refetchJobs={refetch}
         />
       </Match>
     </Switch>

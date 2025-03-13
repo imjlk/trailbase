@@ -12,7 +12,7 @@ use std::sync::{
 };
 use trailbase_sqlite::{params, Connection};
 
-use crate::config::proto::{Config, SystemCronJob, SystemCronJobId};
+use crate::config::proto::{Config, SystemJob, SystemJobId};
 use crate::constants::{DEFAULT_REFRESH_TOKEN_TTL, LOGS_RETENTION_DEFAULT, SESSION_TABLE};
 use crate::DataDir;
 
@@ -20,7 +20,7 @@ type CallbackError = Box<dyn std::error::Error + Sync + Send>;
 type CallbackFunction = dyn Fn() -> BoxFuture<'static, Result<(), CallbackError>> + Sync + Send;
 type LatestCallbackExecution = Option<(DateTime<Utc>, Option<CallbackError>)>;
 
-static TASK_COUNTER: AtomicI32 = AtomicI32::new(1024);
+static JOB_ID_COUNTER: AtomicI32 = AtomicI32::new(1024);
 
 pub trait CallbackResultTrait {
   fn into_result(self) -> Result<(), CallbackError>;
@@ -39,7 +39,7 @@ impl<T: Into<CallbackError>> CallbackResultTrait for Result<(), T> {
 }
 
 #[allow(unused)]
-pub struct Task {
+pub struct Job {
   pub id: i32,
   pub name: String,
   pub schedule: Schedule,
@@ -49,13 +49,13 @@ pub struct Task {
   latest: Arc<Mutex<LatestCallbackExecution>>,
 }
 
-pub struct TaskRegistry {
-  pub(crate) tasks: Mutex<HashMap<i32, Task>>,
+pub struct JobRegistry {
+  pub(crate) jobs: Mutex<HashMap<i32, Job>>,
 }
 
-impl Task {
+impl Job {
   fn new(id: i32, name: String, schedule: Schedule, callback: Arc<CallbackFunction>) -> Self {
-    return Task {
+    return Job {
       id,
       name,
       schedule,
@@ -88,7 +88,7 @@ impl Task {
         *latest.lock() = Some((Utc::now(), result.err()));
       }
 
-      log::info!("Exited task: '{name}'");
+      log::info!("Exited job: '{name}'");
     });
 
     self.handle = Some(handle.abort_handle());
@@ -106,10 +106,10 @@ impl Task {
   }
 }
 
-impl TaskRegistry {
+impl JobRegistry {
   pub fn new() -> Self {
-    return TaskRegistry {
-      tasks: Mutex::new(HashMap::new()),
+    return JobRegistry {
+      jobs: Mutex::new(HashMap::new()),
     };
   }
 
@@ -120,17 +120,13 @@ impl TaskRegistry {
     schedule: Schedule,
     callback: Box<CallbackFunction>,
   ) -> bool {
-    let id = id.unwrap_or_else(|| TASK_COUNTER.fetch_add(1, Ordering::SeqCst));
-    return match self.tasks.lock().entry(id) {
+    let id = id.unwrap_or_else(|| JOB_ID_COUNTER.fetch_add(1, Ordering::SeqCst));
+    return match self.jobs.lock().entry(id) {
       Entry::Occupied(_) => false,
       Entry::Vacant(entry) => {
-        let task = {
-          let mut task = Task::new(id, name.into(), schedule, callback.into());
-          task.start();
-          task
-        };
-
-        entry.insert(task);
+        let mut job = Job::new(id, name.into(), schedule, callback.into());
+        job.start();
+        entry.insert(job);
 
         true
       }
@@ -138,10 +134,10 @@ impl TaskRegistry {
   }
 }
 
-impl Drop for TaskRegistry {
+impl Drop for JobRegistry {
   fn drop(&mut self) {
-    let mut tasks = self.tasks.lock();
-    for t in tasks.values_mut() {
+    let mut jobs = self.jobs.lock();
+    for t in jobs.values_mut() {
       t.stop();
     }
   }
@@ -164,39 +160,39 @@ where
   });
 }
 
-struct Job {
+struct DefaultSystemJob {
   name: &'static str,
-  default: SystemCronJob,
+  default: SystemJob,
   callback: Box<CallbackFunction>,
 }
 
 fn build_job(
-  id: SystemCronJobId,
+  id: SystemJobId,
   data_dir: &DataDir,
   config: &Config,
   conn: &Connection,
   logs_conn: &Connection,
-) -> Job {
+) -> DefaultSystemJob {
   return match id {
-    SystemCronJobId::Undefined => Job {
+    SystemJobId::Undefined => DefaultSystemJob {
       name: "",
-      default: SystemCronJob::default(),
+      default: SystemJob::default(),
       #[allow(unreachable_code)]
       callback: build_callback(move || {
-        panic!("undefined cron job");
+        panic!("undefined job");
         async {}
       }),
     },
-    SystemCronJobId::Backup => {
+    SystemJobId::Backup => {
       let backup_file = data_dir.backup_path().join("backup.db");
       let conn = conn.clone();
 
-      Job {
+      DefaultSystemJob {
         name: "Backup",
-        default: SystemCronJob {
+        default: SystemJob {
           id: Some(id as i32),
-          spec: Some("@daily".into()),
-          disable_job: Some(true),
+          schedule: Some("@daily".into()),
+          disabled: Some(true),
         },
         callback: build_callback(move || {
           let conn = conn.clone();
@@ -222,31 +218,31 @@ fn build_job(
         }),
       }
     }
-    SystemCronJobId::Heartbeat => Job {
+    SystemJobId::Heartbeat => DefaultSystemJob {
       name: "Heartbeat",
-      default: SystemCronJob {
+      default: SystemJob {
         id: Some(id as i32),
         //         sec  min   hour   day of month   month   day of week  year
-        spec: Some("17   *     *         *            *         *         *".into()),
-        disable_job: Some(false),
+        schedule: Some("17   *     *         *            *         *         *".into()),
+        disabled: Some(false),
       },
       callback: build_callback(|| async {
         info!("alive");
       }),
     },
-    SystemCronJobId::LogCleaner => {
+    SystemJobId::LogCleaner => {
       let logs_conn = logs_conn.clone();
       let retention = config
         .server
         .logs_retention_sec
         .map_or(LOGS_RETENTION_DEFAULT, Duration::seconds);
 
-      Job {
+      DefaultSystemJob {
         name: "Logs Cleanup",
-        default: SystemCronJob {
+        default: SystemJob {
           id: Some(id as i32),
-          spec: Some("@hourly".into()),
-          disable_job: Some(false),
+          schedule: Some("@hourly".into()),
+          disabled: Some(false),
         },
         callback: build_callback(move || {
           let logs_conn = logs_conn.clone();
@@ -266,19 +262,19 @@ fn build_job(
         }),
       }
     }
-    SystemCronJobId::AuthCleaner => {
+    SystemJobId::AuthCleaner => {
       let user_conn = conn.clone();
       let refresh_token_ttl = config
         .auth
         .refresh_token_ttl_sec
         .map_or(DEFAULT_REFRESH_TOKEN_TTL, Duration::seconds);
 
-      Job {
+      DefaultSystemJob {
         name: "Auth Cleanup",
-        default: SystemCronJob {
+        default: SystemJob {
           id: Some(id as i32),
-          spec: Some("@hourly".into()),
-          disable_job: Some(false),
+          schedule: Some("@hourly".into()),
+          disabled: Some(false),
         },
         callback: build_callback(move || {
           let user_conn = user_conn.clone();
@@ -302,15 +298,15 @@ fn build_job(
         }),
       }
     }
-    SystemCronJobId::QueryOptimizer => {
+    SystemJobId::QueryOptimizer => {
       let conn = conn.clone();
 
-      Job {
+      DefaultSystemJob {
         name: "Query Optimizer",
-        default: SystemCronJob {
+        default: SystemJob {
           id: Some(id as i32),
-          spec: Some("@daily".into()),
-          disable_job: Some(false),
+          schedule: Some("@daily".into()),
+          disabled: Some(false),
         },
         callback: build_callback(move || {
           let conn = conn.clone();
@@ -329,48 +325,48 @@ fn build_job(
   };
 }
 
-pub fn build_task_registry_from_config(
+pub fn build_job_registry_from_config(
   config: &Config,
   data_dir: &DataDir,
   conn: &Connection,
   logs_conn: &Connection,
-) -> Result<TaskRegistry, CallbackError> {
-  let jobs = [
-    SystemCronJobId::Backup,
-    SystemCronJobId::Heartbeat,
-    SystemCronJobId::LogCleaner,
-    SystemCronJobId::AuthCleaner,
-    SystemCronJobId::QueryOptimizer,
+) -> Result<JobRegistry, CallbackError> {
+  let job_ids = [
+    SystemJobId::Backup,
+    SystemJobId::Heartbeat,
+    SystemJobId::LogCleaner,
+    SystemJobId::AuthCleaner,
+    SystemJobId::QueryOptimizer,
   ];
 
-  let tasks = TaskRegistry::new();
-  for job_id in jobs {
-    let Job {
+  let jobs = JobRegistry::new();
+  for job_id in job_ids {
+    let DefaultSystemJob {
       name,
       default,
       callback,
     } = build_job(job_id, data_dir, config, conn, logs_conn);
 
     let config = config
-      .cron
+      .jobs
       .system_jobs
       .iter()
       .find(|j| j.id == Some(job_id as i32))
       .unwrap_or(&default);
 
-    if config.disable_job == Some(true) {
+    if config.disabled == Some(true) {
       log::debug!("Job '{name}' disabled. Skipping");
       continue;
     }
 
-    let spec = config
-      .spec
+    let schedule = config
+      .schedule
       .as_ref()
-      .unwrap_or_else(|| default.spec.as_ref().expect("startup"));
+      .unwrap_or_else(|| default.schedule.as_ref().expect("startup"));
 
-    match Schedule::from_str(spec) {
+    match Schedule::from_str(schedule) {
       Ok(schedule) => {
-        let success = tasks.add_task(Some(job_id as i32), name, schedule, callback);
+        let success = jobs.add_task(Some(job_id as i32), name, schedule, callback);
         if !success {
           log::error!("Duplicate job definition for '{name}'");
         }
@@ -381,7 +377,7 @@ pub fn build_task_registry_from_config(
     };
   }
 
-  return Ok(tasks);
+  return Ok(jobs);
 }
 
 #[cfg(test)]
@@ -406,7 +402,7 @@ mod tests {
     // NOTE: Interval-based scheduling is generally problematic because it drifts. For something
     // like a backup you certainly want to control when and not how often it happens (e.g. at
     // night).
-    let registry = TaskRegistry::new();
+    let registry = JobRegistry::new();
 
     let (sender, receiver) = async_channel::unbounded::<()>();
 
@@ -427,10 +423,10 @@ mod tests {
 
     receiver.recv().await.unwrap();
 
-    let tasks = registry.tasks.lock();
-    let first = tasks.keys().next().unwrap();
+    let jobs = registry.jobs.lock();
+    let first = jobs.keys().next().unwrap();
 
-    let latest = tasks.get(first).unwrap().latest.lock();
+    let latest = jobs.get(first).unwrap().latest.lock();
     let (_timestamp, err) = latest.as_ref().unwrap();
     assert_eq!(err.as_ref().unwrap().to_string(), "result");
   }

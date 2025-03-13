@@ -7,23 +7,23 @@ use crate::AppState;
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
-pub struct RunTaskRequest {
+pub struct RunJobRequest {
   id: i32,
 }
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
-pub struct RunTaskResponse {
+pub struct RunJobResponse {
   error: Option<String>,
 }
 
-pub async fn run_tasks_handler(
+pub async fn run_job_handler(
   State(state): State<AppState>,
-  Json(request): Json<RunTaskRequest>,
-) -> Result<Json<RunTaskResponse>, Error> {
+  Json(request): Json<RunJobRequest>,
+) -> Result<Json<RunJobResponse>, Error> {
   let callback = {
-    let tasks = state.tasks();
-    let lock = tasks.tasks.lock();
+    let jobs = state.jobs();
+    let lock = jobs.jobs.lock();
     let Some(task) = lock.get(&request.id) else {
       return Err(Error::Precondition("Not found".into()));
     };
@@ -33,7 +33,7 @@ pub async fn run_tasks_handler(
 
   let result = callback().await;
 
-  return Ok(Json(RunTaskResponse {
+  return Ok(Json(RunJobResponse {
     error: result.err().map(|e| e.to_string()),
   }));
 }

@@ -78,8 +78,8 @@ export function oAuthProviderIdToJSON(object: OAuthProviderId): string {
   }
 }
 
-export enum SystemCronJobId {
-  SYSTEM_CRON_JOB_ID_UNDEFINED = 0,
+export enum SystemJobId {
+  SYSTEM_JOB_ID_UNDEFINED = 0,
   BACKUP = 1,
   HEARTBEAT = 2,
   LOG_CLEANER = 3,
@@ -88,48 +88,48 @@ export enum SystemCronJobId {
   UNRECOGNIZED = -1,
 }
 
-export function systemCronJobIdFromJSON(object: any): SystemCronJobId {
+export function systemJobIdFromJSON(object: any): SystemJobId {
   switch (object) {
     case 0:
-    case "SYSTEM_CRON_JOB_ID_UNDEFINED":
-      return SystemCronJobId.SYSTEM_CRON_JOB_ID_UNDEFINED;
+    case "SYSTEM_JOB_ID_UNDEFINED":
+      return SystemJobId.SYSTEM_JOB_ID_UNDEFINED;
     case 1:
     case "BACKUP":
-      return SystemCronJobId.BACKUP;
+      return SystemJobId.BACKUP;
     case 2:
     case "HEARTBEAT":
-      return SystemCronJobId.HEARTBEAT;
+      return SystemJobId.HEARTBEAT;
     case 3:
     case "LOG_CLEANER":
-      return SystemCronJobId.LOG_CLEANER;
+      return SystemJobId.LOG_CLEANER;
     case 4:
     case "AUTH_CLEANER":
-      return SystemCronJobId.AUTH_CLEANER;
+      return SystemJobId.AUTH_CLEANER;
     case 5:
     case "QUERY_OPTIMIZER":
-      return SystemCronJobId.QUERY_OPTIMIZER;
+      return SystemJobId.QUERY_OPTIMIZER;
     case -1:
     case "UNRECOGNIZED":
     default:
-      return SystemCronJobId.UNRECOGNIZED;
+      return SystemJobId.UNRECOGNIZED;
   }
 }
 
-export function systemCronJobIdToJSON(object: SystemCronJobId): string {
+export function systemJobIdToJSON(object: SystemJobId): string {
   switch (object) {
-    case SystemCronJobId.SYSTEM_CRON_JOB_ID_UNDEFINED:
-      return "SYSTEM_CRON_JOB_ID_UNDEFINED";
-    case SystemCronJobId.BACKUP:
+    case SystemJobId.SYSTEM_JOB_ID_UNDEFINED:
+      return "SYSTEM_JOB_ID_UNDEFINED";
+    case SystemJobId.BACKUP:
       return "BACKUP";
-    case SystemCronJobId.HEARTBEAT:
+    case SystemJobId.HEARTBEAT:
       return "HEARTBEAT";
-    case SystemCronJobId.LOG_CLEANER:
+    case SystemJobId.LOG_CLEANER:
       return "LOG_CLEANER";
-    case SystemCronJobId.AUTH_CLEANER:
+    case SystemJobId.AUTH_CLEANER:
       return "AUTH_CLEANER";
-    case SystemCronJobId.QUERY_OPTIMIZER:
+    case SystemJobId.QUERY_OPTIMIZER:
       return "QUERY_OPTIMIZER";
-    case SystemCronJobId.UNRECOGNIZED:
+    case SystemJobId.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -362,27 +362,27 @@ export interface ServerConfig {
   s3StorageConfig?: S3StorageConfig | undefined;
 }
 
-export interface SystemCronJob {
-  /** / Identifies the system cron job by its id. */
+export interface SystemJob {
+  /** / Identifies the system job by its id. */
   id?:
-    | SystemCronJobId
+    | SystemJobId
     | undefined;
-  /** / Cron spec (sec, min, hour, day of month, month, day of week, year). */
-  spec?:
+  /** / Cron spec: shorthand or 7-components: (sec, min, hour, day of month, / month, day of week, year). */
+  schedule?:
     | string
     | undefined;
   /** / Disable the system job. */
-  disableJob?: boolean | undefined;
+  disabled?: boolean | undefined;
 }
 
-export interface CronConfig {
+export interface JobsConfig {
   /**
    * / System jobs overrides.
    * /
    * / NOTE: This is technically a map from id to config, however enums are not
    * / allowed as map keys.
    */
-  systemJobs: SystemCronJob[];
+  systemJobs: SystemJob[];
 }
 
 export interface RecordApiConfig {
@@ -466,7 +466,7 @@ export interface Config {
   email: EmailConfig | undefined;
   server: ServerConfig | undefined;
   auth: AuthConfig | undefined;
-  cron: CronConfig | undefined;
+  jobs: JobsConfig | undefined;
   recordApis: RecordApiConfig[];
   schemas: JsonSchemaConfig[];
 }
@@ -1349,28 +1349,28 @@ export const ServerConfig: MessageFns<ServerConfig> = {
   },
 };
 
-function createBaseSystemCronJob(): SystemCronJob {
+function createBaseSystemJob(): SystemJob {
   return {};
 }
 
-export const SystemCronJob: MessageFns<SystemCronJob> = {
-  encode(message: SystemCronJob, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const SystemJob: MessageFns<SystemJob> = {
+  encode(message: SystemJob, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.id !== undefined && message.id !== 0) {
       writer.uint32(8).int32(message.id);
     }
-    if (message.spec !== undefined && message.spec !== "") {
-      writer.uint32(18).string(message.spec);
+    if (message.schedule !== undefined && message.schedule !== "") {
+      writer.uint32(18).string(message.schedule);
     }
-    if (message.disableJob !== undefined && message.disableJob !== false) {
-      writer.uint32(24).bool(message.disableJob);
+    if (message.disabled !== undefined && message.disabled !== false) {
+      writer.uint32(24).bool(message.disabled);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): SystemCronJob {
+  decode(input: BinaryReader | Uint8Array, length?: number): SystemJob {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     let end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseSystemCronJob();
+    const message = createBaseSystemJob();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1387,7 +1387,7 @@ export const SystemCronJob: MessageFns<SystemCronJob> = {
             break;
           }
 
-          message.spec = reader.string();
+          message.schedule = reader.string();
           continue;
         }
         case 3: {
@@ -1395,7 +1395,7 @@ export const SystemCronJob: MessageFns<SystemCronJob> = {
             break;
           }
 
-          message.disableJob = reader.bool();
+          message.disabled = reader.bool();
           continue;
         }
       }
@@ -1407,56 +1407,56 @@ export const SystemCronJob: MessageFns<SystemCronJob> = {
     return message;
   },
 
-  fromJSON(object: any): SystemCronJob {
+  fromJSON(object: any): SystemJob {
     return {
-      id: isSet(object.id) ? systemCronJobIdFromJSON(object.id) : undefined,
-      spec: isSet(object.spec) ? globalThis.String(object.spec) : undefined,
-      disableJob: isSet(object.disableJob) ? globalThis.Boolean(object.disableJob) : undefined,
+      id: isSet(object.id) ? systemJobIdFromJSON(object.id) : undefined,
+      schedule: isSet(object.schedule) ? globalThis.String(object.schedule) : undefined,
+      disabled: isSet(object.disabled) ? globalThis.Boolean(object.disabled) : undefined,
     };
   },
 
-  toJSON(message: SystemCronJob): unknown {
+  toJSON(message: SystemJob): unknown {
     const obj: any = {};
     if (message.id !== undefined && message.id !== 0) {
-      obj.id = systemCronJobIdToJSON(message.id);
+      obj.id = systemJobIdToJSON(message.id);
     }
-    if (message.spec !== undefined && message.spec !== "") {
-      obj.spec = message.spec;
+    if (message.schedule !== undefined && message.schedule !== "") {
+      obj.schedule = message.schedule;
     }
-    if (message.disableJob !== undefined && message.disableJob !== false) {
-      obj.disableJob = message.disableJob;
+    if (message.disabled !== undefined && message.disabled !== false) {
+      obj.disabled = message.disabled;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<SystemCronJob>, I>>(base?: I): SystemCronJob {
-    return SystemCronJob.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<SystemJob>, I>>(base?: I): SystemJob {
+    return SystemJob.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<SystemCronJob>, I>>(object: I): SystemCronJob {
-    const message = createBaseSystemCronJob();
+  fromPartial<I extends Exact<DeepPartial<SystemJob>, I>>(object: I): SystemJob {
+    const message = createBaseSystemJob();
     message.id = object.id ?? 0;
-    message.spec = object.spec ?? "";
-    message.disableJob = object.disableJob ?? false;
+    message.schedule = object.schedule ?? "";
+    message.disabled = object.disabled ?? false;
     return message;
   },
 };
 
-function createBaseCronConfig(): CronConfig {
+function createBaseJobsConfig(): JobsConfig {
   return { systemJobs: [] };
 }
 
-export const CronConfig: MessageFns<CronConfig> = {
-  encode(message: CronConfig, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const JobsConfig: MessageFns<JobsConfig> = {
+  encode(message: JobsConfig, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     for (const v of message.systemJobs) {
-      SystemCronJob.encode(v!, writer.uint32(10).fork()).join();
+      SystemJob.encode(v!, writer.uint32(10).fork()).join();
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): CronConfig {
+  decode(input: BinaryReader | Uint8Array, length?: number): JobsConfig {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     let end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseCronConfig();
+    const message = createBaseJobsConfig();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1465,7 +1465,7 @@ export const CronConfig: MessageFns<CronConfig> = {
             break;
           }
 
-          message.systemJobs.push(SystemCronJob.decode(reader, reader.uint32()));
+          message.systemJobs.push(SystemJob.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -1477,28 +1477,28 @@ export const CronConfig: MessageFns<CronConfig> = {
     return message;
   },
 
-  fromJSON(object: any): CronConfig {
+  fromJSON(object: any): JobsConfig {
     return {
       systemJobs: globalThis.Array.isArray(object?.systemJobs)
-        ? object.systemJobs.map((e: any) => SystemCronJob.fromJSON(e))
+        ? object.systemJobs.map((e: any) => SystemJob.fromJSON(e))
         : [],
     };
   },
 
-  toJSON(message: CronConfig): unknown {
+  toJSON(message: JobsConfig): unknown {
     const obj: any = {};
     if (message.systemJobs?.length) {
-      obj.systemJobs = message.systemJobs.map((e) => SystemCronJob.toJSON(e));
+      obj.systemJobs = message.systemJobs.map((e) => SystemJob.toJSON(e));
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<CronConfig>, I>>(base?: I): CronConfig {
-    return CronConfig.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<JobsConfig>, I>>(base?: I): JobsConfig {
+    return JobsConfig.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<CronConfig>, I>>(object: I): CronConfig {
-    const message = createBaseCronConfig();
-    message.systemJobs = object.systemJobs?.map((e) => SystemCronJob.fromPartial(e)) || [];
+  fromPartial<I extends Exact<DeepPartial<JobsConfig>, I>>(object: I): JobsConfig {
+    const message = createBaseJobsConfig();
+    message.systemJobs = object.systemJobs?.map((e) => SystemJob.fromPartial(e)) || [];
     return message;
   },
 };
@@ -1866,7 +1866,7 @@ export const JsonSchemaConfig: MessageFns<JsonSchemaConfig> = {
 };
 
 function createBaseConfig(): Config {
-  return { email: undefined, server: undefined, auth: undefined, cron: undefined, recordApis: [], schemas: [] };
+  return { email: undefined, server: undefined, auth: undefined, jobs: undefined, recordApis: [], schemas: [] };
 }
 
 export const Config: MessageFns<Config> = {
@@ -1880,8 +1880,8 @@ export const Config: MessageFns<Config> = {
     if (message.auth !== undefined) {
       AuthConfig.encode(message.auth, writer.uint32(34).fork()).join();
     }
-    if (message.cron !== undefined) {
-      CronConfig.encode(message.cron, writer.uint32(42).fork()).join();
+    if (message.jobs !== undefined) {
+      JobsConfig.encode(message.jobs, writer.uint32(42).fork()).join();
     }
     for (const v of message.recordApis) {
       RecordApiConfig.encode(v!, writer.uint32(90).fork()).join();
@@ -1928,7 +1928,7 @@ export const Config: MessageFns<Config> = {
             break;
           }
 
-          message.cron = CronConfig.decode(reader, reader.uint32());
+          message.jobs = JobsConfig.decode(reader, reader.uint32());
           continue;
         }
         case 11: {
@@ -1961,7 +1961,7 @@ export const Config: MessageFns<Config> = {
       email: isSet(object.email) ? EmailConfig.fromJSON(object.email) : undefined,
       server: isSet(object.server) ? ServerConfig.fromJSON(object.server) : undefined,
       auth: isSet(object.auth) ? AuthConfig.fromJSON(object.auth) : undefined,
-      cron: isSet(object.cron) ? CronConfig.fromJSON(object.cron) : undefined,
+      jobs: isSet(object.jobs) ? JobsConfig.fromJSON(object.jobs) : undefined,
       recordApis: globalThis.Array.isArray(object?.recordApis)
         ? object.recordApis.map((e: any) => RecordApiConfig.fromJSON(e))
         : [],
@@ -1982,8 +1982,8 @@ export const Config: MessageFns<Config> = {
     if (message.auth !== undefined) {
       obj.auth = AuthConfig.toJSON(message.auth);
     }
-    if (message.cron !== undefined) {
-      obj.cron = CronConfig.toJSON(message.cron);
+    if (message.jobs !== undefined) {
+      obj.jobs = JobsConfig.toJSON(message.jobs);
     }
     if (message.recordApis?.length) {
       obj.recordApis = message.recordApis.map((e) => RecordApiConfig.toJSON(e));
@@ -2008,8 +2008,8 @@ export const Config: MessageFns<Config> = {
     message.auth = (object.auth !== undefined && object.auth !== null)
       ? AuthConfig.fromPartial(object.auth)
       : undefined;
-    message.cron = (object.cron !== undefined && object.cron !== null)
-      ? CronConfig.fromPartial(object.cron)
+    message.jobs = (object.jobs !== undefined && object.jobs !== null)
+      ? JobsConfig.fromPartial(object.jobs)
       : undefined;
     message.recordApis = object.recordApis?.map((e) => RecordApiConfig.fromPartial(e)) || [];
     message.schemas = object.schemas?.map((e) => JsonSchemaConfig.fromPartial(e)) || [];
