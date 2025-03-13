@@ -76,13 +76,17 @@ impl Job {
 
   fn start(&self) {
     let state = self.state.clone();
+    let (name, schedule) = {
+      let lock = state.lock();
+      if let Some(ref handle) = lock.handle {
+        log::warn!("starting an already running job");
+        handle.abort();
+      }
+
+      (lock.name.clone(), lock.schedule.clone())
+    };
 
     let handle = tokio::spawn(async move {
-      let (name, schedule) = {
-        let lock = state.lock();
-        (lock.name.clone(), lock.schedule.clone())
-      };
-
       loop {
         let now = Utc::now();
         let Some(next) = schedule.upcoming(Utc).next() else {
@@ -174,17 +178,15 @@ impl JobRegistry {
     name: impl Into<String>,
     schedule: Schedule,
     callback: Box<CallbackFunction>,
-  ) -> bool {
+  ) -> Option<Job> {
     let id = id.unwrap_or_else(|| JOB_ID_COUNTER.fetch_add(1, Ordering::SeqCst));
     return match self.jobs.lock().entry(id) {
-      Entry::Occupied(_) => false,
-      Entry::Vacant(entry) => {
-        let job = Job::new(id, name.into(), schedule, callback);
-        job.start();
-        entry.insert(job);
-
-        true
-      }
+      Entry::Occupied(_) => None,
+      Entry::Vacant(entry) => Some(
+        entry
+          .insert(Job::new(id, name.into(), schedule, callback))
+          .clone(),
+      ),
     };
   }
 
@@ -286,8 +288,8 @@ fn build_job(
       name: "Heartbeat",
       default: SystemJob {
         id: Some(id as i32),
-        //         sec  min   hour   day of month   month   day of week  year
-        schedule: Some("17   *     *         *            *         *         *".into()),
+        // sec   min   hour   day of month   month   day of week   year
+        schedule: Some("17 * * * * * *".into()),
         disabled: Some(false),
       },
       callback: build_callback(|| async {
@@ -418,23 +420,22 @@ pub fn build_job_registry_from_config(
       .find(|j| j.id == Some(job_id as i32))
       .unwrap_or(&default);
 
-    if config.disabled == Some(true) {
-      log::debug!("Job '{name}' disabled. Skipping");
-      continue;
-    }
-
     let schedule = config
       .schedule
       .as_ref()
       .unwrap_or_else(|| default.schedule.as_ref().expect("startup"));
 
     match Schedule::from_str(schedule) {
-      Ok(schedule) => {
-        let success = jobs.new_job(Some(job_id as i32), name, schedule, callback);
-        if !success {
+      Ok(schedule) => match jobs.new_job(Some(job_id as i32), name, schedule, callback) {
+        Some(job) => {
+          if config.disabled != Some(true) {
+            job.start();
+          }
+        }
+        None => {
           log::error!("Duplicate job definition for '{name}'");
         }
-      }
+      },
       Err(err) => {
         log::error!("Invalid time spec for '{name}': {err}");
       }
@@ -472,18 +473,22 @@ mod tests {
 
     //               sec  min   hour   day of month   month   day of week  year
     let expression = "*    *     *         *            *         *         *";
-    registry.new_job(
-      None,
-      "Test Task",
-      Schedule::from_str(expression).unwrap(),
-      build_callback(move || {
-        let sender = sender.clone();
-        return async move {
-          sender.send(()).await.unwrap();
-          Err("result")
-        };
-      }),
-    );
+    let job = registry
+      .new_job(
+        None,
+        "Test Task",
+        Schedule::from_str(expression).unwrap(),
+        build_callback(move || {
+          let sender = sender.clone();
+          return async move {
+            sender.send(()).await.unwrap();
+            Err("result")
+          };
+        }),
+      )
+      .unwrap();
+
+    job.start();
 
     receiver.recv().await.unwrap();
 

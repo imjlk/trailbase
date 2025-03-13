@@ -71,24 +71,26 @@ impl AppState {
   pub(crate) fn new(args: AppStateArgs) -> Self {
     let config = ValueNotifier::new(args.config);
 
-    let table_metadata_clone = args.table_metadata.clone();
-    let conn_clone = args.conn.clone();
+    let record_apis = {
+      let table_metadata_clone = args.table_metadata.clone();
+      let conn_clone = args.conn.clone();
 
-    let record_apis = Computed::new(&config, move |c| {
-      return c
-        .record_apis
-        .iter()
-        .filter_map(|config| {
-          match build_record_api(conn_clone.clone(), &table_metadata_clone, config.clone()) {
-            Ok(api) => Some((api.api_name().to_string(), api)),
-            Err(err) => {
-              error!("{err}");
-              None
+      Computed::new(&config, move |c| {
+        return c
+          .record_apis
+          .iter()
+          .filter_map(|config| {
+            match build_record_api(conn_clone.clone(), &table_metadata_clone, config.clone()) {
+              Ok(api) => Some((api.api_name().to_string(), api)),
+              Err(err) => {
+                error!("{err}");
+                None
+              }
             }
-          }
-        })
-        .collect::<Vec<_>>();
-    });
+          })
+          .collect::<Vec<_>>();
+      })
+    };
 
     let runtime = {
       let runtime = args
@@ -112,6 +114,7 @@ impl AppState {
         dev: args.dev,
         demo: args.demo,
         oauth: Computed::new(&config, |c| {
+          log::debug!("building oauth from config");
           match ConfiguredOAuthProviders::from_config(c.auth.clone()) {
             Ok(providers) => providers,
             Err(err) => {
@@ -121,6 +124,7 @@ impl AppState {
           }
         }),
         jobs: Computed::new(&config, move |c| {
+          log::debug!("building jobs from config");
           let (ref data_dir, ref conn, ref logs_conn) = jobs_input;
           match build_job_registry_from_config(c, data_dir, conn, logs_conn) {
             Ok(jobs) => jobs,
@@ -130,7 +134,7 @@ impl AppState {
             }
           }
         }),
-        mailer: build_mailer(&config, None),
+        mailer: Computed::new(&config, Mailer::new_from_config),
         record_apis: record_apis.clone(),
         config,
         conn: args.conn.clone(),
@@ -295,19 +299,6 @@ impl AppState {
   }
 }
 
-fn build_mailer(
-  config: &ValueNotifier<Config>,
-  mailer: Option<Mailer>,
-) -> Computed<Mailer, Config> {
-  return Computed::new(config, move |c| {
-    if let Some(mailer) = mailer.clone() {
-      return mailer;
-    }
-
-    return Mailer::new_from_config(c);
-  });
-}
-
 #[cfg(test)]
 #[derive(Default)]
 pub struct TestStateOptions {
@@ -429,8 +420,17 @@ pub async fn test_state(options: Option<TestStateOptions>) -> anyhow::Result<App
       .collect::<Vec<_>>();
   });
 
-  let runtime = RuntimeHandle::new();
-  runtime.set_connection(conn.clone());
+  let runtime = {
+    let runtime = RuntimeHandle::new();
+    runtime.set_connection(conn.clone());
+    runtime
+  };
+
+  fn build_mailer(c: &ValueNotifier<Config>, mailer: Option<Mailer>) -> Computed<Mailer, Config> {
+    return Computed::new(c, move |c| {
+      return mailer.clone().unwrap_or_else(|| Mailer::new_from_config(c));
+    });
+  }
 
   return Ok(AppState {
     state: Arc::new(InternalState {
