@@ -30,6 +30,7 @@ import { ConfirmCloseDialog } from "@/components/SafeSheet";
 import { AuthSettings } from "@/components/settings/AuthSettings";
 import { SchemaSettings } from "@/components/settings/SchemaSettings";
 import { EmailSettings } from "@/components/settings/EmailSettings";
+import { TaskSettings } from "@/components/settings/TaskSettings";
 import { SplitView } from "@/components/SplitView";
 import { IconButton } from "@/components/IconButton";
 
@@ -460,6 +461,11 @@ const sites = [
     route: "backup",
     label: "Backup",
     child: BackupImportSettings,
+  },
+  {
+    route: "tasks",
+    label: "Tasks",
+    child: TaskSettings,
   },
 ] as const;
 
