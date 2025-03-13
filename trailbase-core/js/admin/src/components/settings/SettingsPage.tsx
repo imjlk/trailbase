@@ -182,7 +182,7 @@ function ServerSettings(props: CommonProps) {
 
         <CardContent class="flex flex-col gap-4">
           <Switch>
-            <Match when={info.error}>info.error</Match>
+            <Match when={info.error}>{info.error}</Match>
             <Match when={info.loading}>Loading...</Match>
             <Match when={info()}>
               <TextField class="w-full">
@@ -463,8 +463,8 @@ const sites = [
     child: BackupImportSettings,
   },
   {
-    route: "tasks",
-    label: "Tasks",
+    route: "jobs",
+    label: "Jobs",
     child: TaskSettings,
   },
 ] as const;

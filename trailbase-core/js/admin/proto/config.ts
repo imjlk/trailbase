@@ -78,6 +78,63 @@ export function oAuthProviderIdToJSON(object: OAuthProviderId): string {
   }
 }
 
+export enum SystemCronJobId {
+  SYSTEM_CRON_JOB_ID_UNDEFINED = 0,
+  BACKUP = 1,
+  HEARTBEAT = 2,
+  LOG_CLEANER = 3,
+  AUTH_CLEANER = 4,
+  QUERY_OPTIMIZER = 5,
+  UNRECOGNIZED = -1,
+}
+
+export function systemCronJobIdFromJSON(object: any): SystemCronJobId {
+  switch (object) {
+    case 0:
+    case "SYSTEM_CRON_JOB_ID_UNDEFINED":
+      return SystemCronJobId.SYSTEM_CRON_JOB_ID_UNDEFINED;
+    case 1:
+    case "BACKUP":
+      return SystemCronJobId.BACKUP;
+    case 2:
+    case "HEARTBEAT":
+      return SystemCronJobId.HEARTBEAT;
+    case 3:
+    case "LOG_CLEANER":
+      return SystemCronJobId.LOG_CLEANER;
+    case 4:
+    case "AUTH_CLEANER":
+      return SystemCronJobId.AUTH_CLEANER;
+    case 5:
+    case "QUERY_OPTIMIZER":
+      return SystemCronJobId.QUERY_OPTIMIZER;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return SystemCronJobId.UNRECOGNIZED;
+  }
+}
+
+export function systemCronJobIdToJSON(object: SystemCronJobId): string {
+  switch (object) {
+    case SystemCronJobId.SYSTEM_CRON_JOB_ID_UNDEFINED:
+      return "SYSTEM_CRON_JOB_ID_UNDEFINED";
+    case SystemCronJobId.BACKUP:
+      return "BACKUP";
+    case SystemCronJobId.HEARTBEAT:
+      return "HEARTBEAT";
+    case SystemCronJobId.LOG_CLEANER:
+      return "LOG_CLEANER";
+    case SystemCronJobId.AUTH_CLEANER:
+      return "AUTH_CLEANER";
+    case SystemCronJobId.QUERY_OPTIMIZER:
+      return "QUERY_OPTIMIZER";
+    case SystemCronJobId.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /**
  * / Sqlite specific (as opposed to standard SQL) constrained-violation
  * / resolution strategy upon insert.
@@ -236,8 +293,10 @@ export interface OAuthProviderConfig {
   providerId?:
     | OAuthProviderId
     | undefined;
-  /** Settings for generic OpenID Connect provider. */
-  name?: string | undefined;
+  /**
+   * Settings for generic OpenID Connect provider. Name is implicitly provided
+   * via the `AuthConfig.oauth_provders` map key.
+   */
   displayName?: string | undefined;
   authUrl?: string | undefined;
   tokenUrl?: string | undefined;
@@ -301,6 +360,29 @@ export interface ServerConfig {
     | undefined;
   /** / If present will use S3 setup over local file-system based storage. */
   s3StorageConfig?: S3StorageConfig | undefined;
+}
+
+export interface SystemCronJob {
+  /** / Identifies the system cron job by its id. */
+  id?:
+    | SystemCronJobId
+    | undefined;
+  /** / Cron spec (sec, min, hour, day of month, month, day of week, year). */
+  spec?:
+    | string
+    | undefined;
+  /** / Disable the system job. */
+  disableJob?: boolean | undefined;
+}
+
+export interface CronConfig {
+  /**
+   * / System jobs overrides.
+   * /
+   * / NOTE: This is technically a map from id to config, however enums are not
+   * / allowed as map keys.
+   */
+  systemJobs: SystemCronJob[];
 }
 
 export interface RecordApiConfig {
@@ -384,6 +466,7 @@ export interface Config {
   email: EmailConfig | undefined;
   server: ServerConfig | undefined;
   auth: AuthConfig | undefined;
+  cron: CronConfig | undefined;
   recordApis: RecordApiConfig[];
   schemas: JsonSchemaConfig[];
 }
@@ -681,9 +764,6 @@ export const OAuthProviderConfig: MessageFns<OAuthProviderConfig> = {
     if (message.providerId !== undefined && message.providerId !== 0) {
       writer.uint32(24).int32(message.providerId);
     }
-    if (message.name !== undefined && message.name !== "") {
-      writer.uint32(82).string(message.name);
-    }
     if (message.displayName !== undefined && message.displayName !== "") {
       writer.uint32(90).string(message.displayName);
     }
@@ -728,14 +808,6 @@ export const OAuthProviderConfig: MessageFns<OAuthProviderConfig> = {
           }
 
           message.providerId = reader.int32() as any;
-          continue;
-        }
-        case 10: {
-          if (tag !== 82) {
-            break;
-          }
-
-          message.name = reader.string();
           continue;
         }
         case 11: {
@@ -784,7 +856,6 @@ export const OAuthProviderConfig: MessageFns<OAuthProviderConfig> = {
       clientId: isSet(object.clientId) ? globalThis.String(object.clientId) : undefined,
       clientSecret: isSet(object.clientSecret) ? globalThis.String(object.clientSecret) : undefined,
       providerId: isSet(object.providerId) ? oAuthProviderIdFromJSON(object.providerId) : undefined,
-      name: isSet(object.name) ? globalThis.String(object.name) : undefined,
       displayName: isSet(object.displayName) ? globalThis.String(object.displayName) : undefined,
       authUrl: isSet(object.authUrl) ? globalThis.String(object.authUrl) : undefined,
       tokenUrl: isSet(object.tokenUrl) ? globalThis.String(object.tokenUrl) : undefined,
@@ -802,9 +873,6 @@ export const OAuthProviderConfig: MessageFns<OAuthProviderConfig> = {
     }
     if (message.providerId !== undefined && message.providerId !== 0) {
       obj.providerId = oAuthProviderIdToJSON(message.providerId);
-    }
-    if (message.name !== undefined && message.name !== "") {
-      obj.name = message.name;
     }
     if (message.displayName !== undefined && message.displayName !== "") {
       obj.displayName = message.displayName;
@@ -829,7 +897,6 @@ export const OAuthProviderConfig: MessageFns<OAuthProviderConfig> = {
     message.clientId = object.clientId ?? "";
     message.clientSecret = object.clientSecret ?? "";
     message.providerId = object.providerId ?? 0;
-    message.name = object.name ?? "";
     message.displayName = object.displayName ?? "";
     message.authUrl = object.authUrl ?? "";
     message.tokenUrl = object.tokenUrl ?? "";
@@ -1282,6 +1349,160 @@ export const ServerConfig: MessageFns<ServerConfig> = {
   },
 };
 
+function createBaseSystemCronJob(): SystemCronJob {
+  return {};
+}
+
+export const SystemCronJob: MessageFns<SystemCronJob> = {
+  encode(message: SystemCronJob, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== undefined && message.id !== 0) {
+      writer.uint32(8).int32(message.id);
+    }
+    if (message.spec !== undefined && message.spec !== "") {
+      writer.uint32(18).string(message.spec);
+    }
+    if (message.disableJob !== undefined && message.disableJob !== false) {
+      writer.uint32(24).bool(message.disableJob);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SystemCronJob {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSystemCronJob();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.id = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.spec = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.disableJob = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SystemCronJob {
+    return {
+      id: isSet(object.id) ? systemCronJobIdFromJSON(object.id) : undefined,
+      spec: isSet(object.spec) ? globalThis.String(object.spec) : undefined,
+      disableJob: isSet(object.disableJob) ? globalThis.Boolean(object.disableJob) : undefined,
+    };
+  },
+
+  toJSON(message: SystemCronJob): unknown {
+    const obj: any = {};
+    if (message.id !== undefined && message.id !== 0) {
+      obj.id = systemCronJobIdToJSON(message.id);
+    }
+    if (message.spec !== undefined && message.spec !== "") {
+      obj.spec = message.spec;
+    }
+    if (message.disableJob !== undefined && message.disableJob !== false) {
+      obj.disableJob = message.disableJob;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SystemCronJob>, I>>(base?: I): SystemCronJob {
+    return SystemCronJob.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SystemCronJob>, I>>(object: I): SystemCronJob {
+    const message = createBaseSystemCronJob();
+    message.id = object.id ?? 0;
+    message.spec = object.spec ?? "";
+    message.disableJob = object.disableJob ?? false;
+    return message;
+  },
+};
+
+function createBaseCronConfig(): CronConfig {
+  return { systemJobs: [] };
+}
+
+export const CronConfig: MessageFns<CronConfig> = {
+  encode(message: CronConfig, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.systemJobs) {
+      SystemCronJob.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CronConfig {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCronConfig();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.systemJobs.push(SystemCronJob.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CronConfig {
+    return {
+      systemJobs: globalThis.Array.isArray(object?.systemJobs)
+        ? object.systemJobs.map((e: any) => SystemCronJob.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: CronConfig): unknown {
+    const obj: any = {};
+    if (message.systemJobs?.length) {
+      obj.systemJobs = message.systemJobs.map((e) => SystemCronJob.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CronConfig>, I>>(base?: I): CronConfig {
+    return CronConfig.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CronConfig>, I>>(object: I): CronConfig {
+    const message = createBaseCronConfig();
+    message.systemJobs = object.systemJobs?.map((e) => SystemCronJob.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseRecordApiConfig(): RecordApiConfig {
   return { aclWorld: [], aclAuthenticated: [], expand: [] };
 }
@@ -1645,7 +1866,7 @@ export const JsonSchemaConfig: MessageFns<JsonSchemaConfig> = {
 };
 
 function createBaseConfig(): Config {
-  return { email: undefined, server: undefined, auth: undefined, recordApis: [], schemas: [] };
+  return { email: undefined, server: undefined, auth: undefined, cron: undefined, recordApis: [], schemas: [] };
 }
 
 export const Config: MessageFns<Config> = {
@@ -1658,6 +1879,9 @@ export const Config: MessageFns<Config> = {
     }
     if (message.auth !== undefined) {
       AuthConfig.encode(message.auth, writer.uint32(34).fork()).join();
+    }
+    if (message.cron !== undefined) {
+      CronConfig.encode(message.cron, writer.uint32(42).fork()).join();
     }
     for (const v of message.recordApis) {
       RecordApiConfig.encode(v!, writer.uint32(90).fork()).join();
@@ -1699,6 +1923,14 @@ export const Config: MessageFns<Config> = {
           message.auth = AuthConfig.decode(reader, reader.uint32());
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.cron = CronConfig.decode(reader, reader.uint32());
+          continue;
+        }
         case 11: {
           if (tag !== 90) {
             break;
@@ -1729,6 +1961,7 @@ export const Config: MessageFns<Config> = {
       email: isSet(object.email) ? EmailConfig.fromJSON(object.email) : undefined,
       server: isSet(object.server) ? ServerConfig.fromJSON(object.server) : undefined,
       auth: isSet(object.auth) ? AuthConfig.fromJSON(object.auth) : undefined,
+      cron: isSet(object.cron) ? CronConfig.fromJSON(object.cron) : undefined,
       recordApis: globalThis.Array.isArray(object?.recordApis)
         ? object.recordApis.map((e: any) => RecordApiConfig.fromJSON(e))
         : [],
@@ -1748,6 +1981,9 @@ export const Config: MessageFns<Config> = {
     }
     if (message.auth !== undefined) {
       obj.auth = AuthConfig.toJSON(message.auth);
+    }
+    if (message.cron !== undefined) {
+      obj.cron = CronConfig.toJSON(message.cron);
     }
     if (message.recordApis?.length) {
       obj.recordApis = message.recordApis.map((e) => RecordApiConfig.toJSON(e));
@@ -1771,6 +2007,9 @@ export const Config: MessageFns<Config> = {
       : undefined;
     message.auth = (object.auth !== undefined && object.auth !== null)
       ? AuthConfig.fromPartial(object.auth)
+      : undefined;
+    message.cron = (object.cron !== undefined && object.cron !== null)
+      ? CronConfig.fromPartial(object.cron)
       : undefined;
     message.recordApis = object.recordApis?.map((e) => RecordApiConfig.fromPartial(e)) || [];
     message.schemas = object.schemas?.map((e) => JsonSchemaConfig.fromPartial(e)) || [];
