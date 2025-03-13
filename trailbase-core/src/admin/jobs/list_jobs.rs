@@ -10,6 +10,10 @@ pub struct Job {
   pub id: i32,
   pub name: String,
   pub schedule: String,
+
+  pub enabled: bool,
+  pub next: Option<i64>,
+  pub latest: Option<(i64, Option<String>)>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -26,10 +30,19 @@ pub async fn list_jobs_handler(
     .jobs
     .lock()
     .values()
-    .map(|t| Job {
-      id: t.id,
-      name: t.name.clone(),
-      schedule: t.schedule.to_string(),
+    .map(|t| {
+      let latest = t.latest().map(|l| (l.0.timestamp(), l.1));
+      let enabled = t.running();
+
+      return Job {
+        id: t.id,
+        name: t.name(),
+        schedule: t.schedule().to_string(),
+
+        enabled,
+        next: t.next_run().map(|t| t.timestamp()),
+        latest,
+      };
     })
     .collect();
 

@@ -38,40 +38,51 @@ impl<T: Into<CallbackError>> CallbackResultTrait for Result<(), T> {
   }
 }
 
-#[allow(unused)]
-pub struct Job {
-  pub id: i32,
-  pub name: String,
-  pub schedule: Schedule,
-  pub(crate) callback: Arc<CallbackFunction>,
+struct JobState {
+  name: String,
+
+  schedule: Schedule,
+  callback: Arc<CallbackFunction>,
 
   handle: Option<tokio::task::AbortHandle>,
-  latest: Arc<Mutex<LatestCallbackExecution>>,
+  latest: LatestCallbackExecution,
 }
 
-pub struct JobRegistry {
-  pub(crate) jobs: Mutex<HashMap<i32, Job>>,
+impl JobState {
+  fn report_result(&mut self, result: Option<CallbackError>) {
+    self.latest = Some((Utc::now(), result))
+  }
+}
+
+#[derive(Clone)]
+pub struct Job {
+  pub id: i32,
+  state: Arc<Mutex<JobState>>,
 }
 
 impl Job {
-  fn new(id: i32, name: String, schedule: Schedule, callback: Arc<CallbackFunction>) -> Self {
+  fn new(id: i32, name: String, schedule: Schedule, callback: Box<CallbackFunction>) -> Self {
     return Job {
       id,
-      name,
-      schedule,
-      callback,
-      handle: None,
-      latest: Arc::new(Mutex::new(None)),
+      state: Arc::new(Mutex::new(JobState {
+        name,
+        schedule,
+        callback: callback.into(),
+        handle: None,
+        latest: None,
+      })),
     };
   }
 
-  fn start(&mut self) {
-    let name = self.name.clone();
-    let callback = self.callback.clone();
-    let schedule = self.schedule.clone();
-    let latest = self.latest.clone();
+  fn start(&self) {
+    let state = self.state.clone();
 
     let handle = tokio::spawn(async move {
+      let (name, schedule) = {
+        let lock = state.lock();
+        (lock.name.clone(), lock.schedule.clone())
+      };
+
       loop {
         let now = Utc::now();
         let Some(next) = schedule.upcoming(Utc).next() else {
@@ -84,26 +95,70 @@ impl Job {
 
         tokio::time::sleep(duration).await;
 
-        let result = (*callback)().await;
-        *latest.lock() = Some((Utc::now(), result.err()));
+        let callback = state.lock().callback.clone();
+        let result = callback().await;
+        state.lock().report_result(result.err());
       }
 
       log::info!("Exited job: '{name}'");
     });
 
-    self.handle = Some(handle.abort_handle());
+    self.state.lock().handle = Some(handle.abort_handle());
   }
 
-  async fn run_now(&self) -> Result<(), CallbackError> {
-    return (self.callback)().await;
+  pub fn next_run(&self) -> Option<DateTime<Utc>> {
+    let lock = self.state.lock();
+    if lock.handle.is_some() {
+      return lock.schedule.upcoming(Utc).next();
+    }
+    return None;
   }
 
-  fn stop(&mut self) {
-    if let Some(ref handle) = self.handle {
+  async fn run_now(&self) -> Result<(), String> {
+    let callback = self.state.lock().callback.clone();
+    let error = callback().await.err();
+
+    let error_str = error.as_ref().map(|err| err.to_string());
+    self.state.lock().report_result(error);
+
+    if let Some(err) = error_str {
+      return Err(err);
+    }
+    return Ok(());
+  }
+
+  fn stop(&self) {
+    let mut lock = self.state.lock();
+    if let Some(ref handle) = lock.handle {
       handle.abort();
     }
-    self.handle = None;
+    lock.handle = None;
   }
+
+  pub fn running(&self) -> bool {
+    return self.state.lock().handle.is_some();
+  }
+
+  pub fn latest(&self) -> Option<(DateTime<Utc>, Option<String>)> {
+    return self
+      .state
+      .lock()
+      .latest
+      .as_ref()
+      .map(|result| (result.0, result.1.as_ref().map(|err| err.to_string())));
+  }
+
+  pub fn name(&self) -> String {
+    return self.state.lock().name.clone();
+  }
+
+  pub fn schedule(&self) -> Schedule {
+    return self.state.lock().schedule.clone();
+  }
+}
+
+pub struct JobRegistry {
+  pub(crate) jobs: Mutex<HashMap<i32, Job>>,
 }
 
 impl JobRegistry {
@@ -113,7 +168,7 @@ impl JobRegistry {
     };
   }
 
-  pub fn add_task(
+  pub fn new_job(
     &self,
     id: Option<i32>,
     name: impl Into<String>,
@@ -124,13 +179,22 @@ impl JobRegistry {
     return match self.jobs.lock().entry(id) {
       Entry::Occupied(_) => false,
       Entry::Vacant(entry) => {
-        let mut job = Job::new(id, name.into(), schedule, callback.into());
+        let job = Job::new(id, name.into(), schedule, callback);
         job.start();
         entry.insert(job);
 
         true
       }
     };
+  }
+
+  pub async fn run_job(&self, id: i32) -> Option<Result<(), String>> {
+    let job = {
+      let jobs = self.jobs.lock();
+      jobs.get(&id)?.clone()
+    };
+
+    return Some(job.run_now().await);
   }
 }
 
@@ -366,7 +430,7 @@ pub fn build_job_registry_from_config(
 
     match Schedule::from_str(schedule) {
       Ok(schedule) => {
-        let success = jobs.add_task(Some(job_id as i32), name, schedule, callback);
+        let success = jobs.new_job(Some(job_id as i32), name, schedule, callback);
         if !success {
           log::error!("Duplicate job definition for '{name}'");
         }
@@ -408,7 +472,7 @@ mod tests {
 
     //               sec  min   hour   day of month   month   day of week  year
     let expression = "*    *     *         *            *         *         *";
-    registry.add_task(
+    registry.new_job(
       None,
       "Test Task",
       Schedule::from_str(expression).unwrap(),
@@ -426,8 +490,8 @@ mod tests {
     let jobs = registry.jobs.lock();
     let first = jobs.keys().next().unwrap();
 
-    let latest = jobs.get(first).unwrap().latest.lock();
-    let (_timestamp, err) = latest.as_ref().unwrap();
-    assert_eq!(err.as_ref().unwrap().to_string(), "result");
+    let latest = jobs.get(first).unwrap().latest();
+    let (_timestamp, err_string) = latest.unwrap();
+    assert_eq!(err_string, Some("result".to_string()));
   }
 }

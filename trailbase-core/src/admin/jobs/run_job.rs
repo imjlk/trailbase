@@ -21,17 +21,9 @@ pub async fn run_job_handler(
   State(state): State<AppState>,
   Json(request): Json<RunJobRequest>,
 ) -> Result<Json<RunJobResponse>, Error> {
-  let callback = {
-    let jobs = state.jobs();
-    let lock = jobs.jobs.lock();
-    let Some(task) = lock.get(&request.id) else {
-      return Err(Error::Precondition("Not found".into()));
-    };
-
-    task.callback.clone()
+  let Some(result) = state.jobs().run_job(request.id).await else {
+    return Err(Error::Precondition("Job not found".into()));
   };
-
-  let result = callback().await;
 
   return Ok(Json(RunJobResponse {
     error: result.err().map(|e| e.to_string()),

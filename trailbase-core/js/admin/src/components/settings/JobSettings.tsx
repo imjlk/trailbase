@@ -14,6 +14,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { TextField, TextFieldInput } from "@/components/ui/text-field";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 import { type FieldApiT, notEmptyValidator } from "@/components/FormFields";
 import { Config, JobsConfig, SystemJob } from "@proto/config";
@@ -132,66 +137,108 @@ export function JobSettingsImpl(props: {
           <TableHead>Id</TableHead>
           <TableHead>Name</TableHead>
           <TableHead>Schedule</TableHead>
+          <TableHead>Next</TableHead>
+          <TableHead>Last</TableHead>
           <TableHead>Enabled</TableHead>
           <TableHead>Action</TableHead>
         </TableHeader>
 
         <TableBody>
           <For each={props.jobs}>
-            {(job: Job, index: () => number) => (
-              <TableRow>
-                <TableCell>{job.id}</TableCell>
+            {(job: Job, index: () => number) => {
+              const next = () => {
+                const timestamp = job.next;
+                if (!timestamp) return null;
 
-                <TableCell>{job.name}</TableCell>
+                const t = new Date(Number(timestamp) * 1000);
 
-                <TableCell>
-                  <form.Field
-                    name={`jobs[${index()}].config.schedule`}
-                    validators={notEmptyValidator()}
-                  >
-                    {(field: () => FieldApiT<string | undefined>) => {
-                      console.log(field().state);
+                return (
+                  <Tooltip>
+                    <TooltipTrigger as="div">
+                      <div class="w-[128px]">{t.toUTCString()}</div>
+                    </TooltipTrigger>
 
-                      return (
-                        <TextField>
-                          <TextFieldInput
-                            type="text"
-                            value={field().state.value}
-                            onBlur={field().handleBlur}
-                            autocomplete="off"
-                            onKeyUp={(e: Event) => {
-                              field().handleChange(
-                                (e.target as HTMLInputElement).value,
-                              );
-                            }}
-                          />
-                        </TextField>
-                      );
-                    }}
-                  </form.Field>
-                </TableCell>
+                    <TooltipContent>
+                      {t.toLocaleString()} (Local)
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              };
 
-                <TableCell>
-                  <Checkbox />
-                </TableCell>
+              const latest = () => {
+                const latest = job.latest;
+                if (!latest) return null;
 
-                <TableCell>
-                  <div class="flex h-full items-center">
-                    <IconButton
-                      onClick={() => {
-                        props.refetchJobs();
-                      }}
-                    >
-                      <TbPlayerPlay size={20} />
-                    </IconButton>
+                const [timestamp, error] = latest;
+                const t = new Date(Number(timestamp) * 1000);
 
-                    <IconButton onClick={() => {}}>
-                      <TbHistory size={20} />
-                    </IconButton>
+                return (
+                  <div>
+                    {t.toUTCString()}
+                    {error}
                   </div>
-                </TableCell>
-              </TableRow>
-            )}
+                );
+              };
+
+              return (
+                <TableRow>
+                  <TableCell>{job.id}</TableCell>
+
+                  <TableCell>{job.name}</TableCell>
+
+                  <TableCell>
+                    <form.Field
+                      name={`jobs[${index()}].config.schedule`}
+                      validators={notEmptyValidator()}
+                    >
+                      {(field: () => FieldApiT<string | undefined>) => {
+                        return (
+                          <TextField>
+                            <TextFieldInput
+                              type="text"
+                              value={field().state.value}
+                              onBlur={field().handleBlur}
+                              autocomplete="off"
+                              onKeyUp={(e: Event) => {
+                                field().handleChange(
+                                  (e.target as HTMLInputElement).value,
+                                );
+                              }}
+                            />
+                          </TextField>
+                        );
+                      }}
+                    </form.Field>
+                  </TableCell>
+
+                  <TableCell>{next()}</TableCell>
+
+                  <TableCell>{latest()}</TableCell>
+
+                  <TableCell>
+                    <div class="flex items-center justify-center">
+                      <Checkbox checked={job.enabled} />
+                    </div>
+                  </TableCell>
+
+                  <TableCell>
+                    <div class="flex h-full items-center">
+                      <IconButton
+                        onClick={() => {
+                          props.refetchJobs();
+                        }}
+                      >
+                        <TbPlayerPlay size={20} />
+                      </IconButton>
+
+                      <IconButton onClick={() => {}}>
+                        <TbHistory size={20} />
+                      </IconButton>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            }}
           </For>
         </TableBody>
       </Table>
