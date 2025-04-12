@@ -11,7 +11,7 @@ use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trailbase_sqlite::Connection;
+use trailbase_sqlite::connection::{Connection, Options};
 
 use crate::connection::{AsyncConnection, SharedRusqlite, ThreadLocalRusqlite};
 use crate::error::BenchmarkError;
@@ -20,6 +20,23 @@ fn try_init_logger() {
   let _ = env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info"))
     .format_timestamp_micros()
     .try_init();
+}
+
+fn build_runtime() -> tokio::runtime::Runtime {
+  let runtime = tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+
+  let n = std::thread::available_parallelism().unwrap().get();
+  if n != runtime.metrics().num_workers() {
+    panic!(
+      "expected {n} workers, got {}",
+      runtime.metrics().num_workers()
+    );
+  }
+
+  return runtime;
 }
 
 struct AsyncBenchmarkSetup<C: AsyncConnection> {
@@ -36,10 +53,7 @@ impl<C: AsyncConnection> AsyncBenchmarkSetup<C> {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let fname = tmp_dir.path().join("main.sqlite");
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-      .enable_all()
-      .build()
-      .unwrap();
+    let runtime = build_runtime();
     let conn = runtime.block_on(builder(fname))?;
 
     return Ok(Self {
@@ -108,11 +122,47 @@ fn insert_benchmark_group(c: &mut Criterion) {
   group.sample_size(500);
   group.throughput(Throughput::Elements(1));
 
-  group.bench_function("trailbase-sqlite", |b| {
+  group.bench_function("trailbase-sqlite (1 thread)", |b| {
     async_insert_benchmark(b, async |fname| {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         None,
+      )?);
+    })
+  });
+
+  group.bench_function("trailbase-sqlite (2 threads)", |b| {
+    async_insert_benchmark(b, async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 2,
+          ..Default::default()
+        }),
+      )?);
+    })
+  });
+
+  group.bench_function("trailbase-sqlite (4 threads)", |b| {
+    async_insert_benchmark(b, async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 4,
+          ..Default::default()
+        }),
+      )?);
+    })
+  });
+
+  group.bench_function("trailbase-sqlite (8 threads)", |b| {
+    async_insert_benchmark(b, async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 8,
+          ..Default::default()
+        }),
       )?);
     })
   });
@@ -145,11 +195,7 @@ fn async_read_benchmark<C: AsyncConnection + 'static>(
   fname: &Path,
   n: usize,
 ) {
-  let runtime = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .unwrap();
-
+  let runtime = build_runtime();
   let conn = Arc::new(runtime.block_on(f(fname.to_path_buf())).unwrap());
 
   b.to_async(&runtime).iter_custom(async |iters| {
@@ -207,13 +253,64 @@ fn read_benchmark_group(c: &mut Criterion) {
   group.sample_size(500);
   group.throughput(Throughput::Elements(1));
 
-  group.bench_function("trailbase-sqlite", |b| {
+  group.bench_function("trailbase-sqlite (1 thread)", |b| {
     async_read_benchmark(
       b,
       async |fname| {
         return Ok(Connection::new(
           || rusqlite::Connection::open(&fname),
           None,
+        )?);
+      },
+      &fname.as_path(),
+      N,
+    )
+  });
+
+  group.bench_function("trailbase-sqlite (2 threads)", |b| {
+    async_read_benchmark(
+      b,
+      async |fname| {
+        return Ok(Connection::new(
+          || rusqlite::Connection::open(&fname),
+          Some(Options {
+            n_threads: 2,
+            ..Default::default()
+          }),
+        )?);
+      },
+      &fname.as_path(),
+      N,
+    )
+  });
+
+  group.bench_function("trailbase-sqlite (4 threads)", |b| {
+    async_read_benchmark(
+      b,
+      async |fname| {
+        return Ok(Connection::new(
+          || rusqlite::Connection::open(&fname),
+          Some(Options {
+            n_threads: 4,
+            ..Default::default()
+          }),
+        )?);
+      },
+      &fname.as_path(),
+      N,
+    )
+  });
+
+  group.bench_function("trailbase-sqlite (8 threads)", |b| {
+    async_read_benchmark(
+      b,
+      async |fname| {
+        return Ok(Connection::new(
+          || rusqlite::Connection::open(&fname),
+          Some(Options {
+            n_threads: 8,
+            ..Default::default()
+          }),
         )?);
       },
       &fname.as_path(),
@@ -369,7 +466,58 @@ fn mixed_benchmark_group(c: &mut Criterion) {
       )?);
     }));
 
-    group.bench_function("trailbase-sqlite", |b| {
+    group.bench_function("trailbase-sqlite (1 thread)", |b| {
+      let assets = assets.clone();
+      async_mixed_benchmark(b, assets, N);
+    });
+  }
+
+  {
+    let assets = Arc::new(setup(async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 2,
+          ..Default::default()
+        }),
+      )?);
+    }));
+
+    group.bench_function("trailbase-sqlite (2 threads)", |b| {
+      let assets = assets.clone();
+      async_mixed_benchmark(b, assets, N);
+    });
+  }
+
+  {
+    let assets = Arc::new(setup(async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 4,
+          ..Default::default()
+        }),
+      )?);
+    }));
+
+    group.bench_function("trailbase-sqlite (4 threads)", |b| {
+      let assets = assets.clone();
+      async_mixed_benchmark(b, assets, N);
+    });
+  }
+
+  {
+    let assets = Arc::new(setup(async |fname| {
+      return Ok(Connection::new(
+        || rusqlite::Connection::open(&fname),
+        Some(Options {
+          n_threads: 8,
+          ..Default::default()
+        }),
+      )?);
+    }));
+
+    group.bench_function("trailbase-sqlite (8 threads)", |b| {
       let assets = assets.clone();
       async_mixed_benchmark(b, assets, N);
     });
