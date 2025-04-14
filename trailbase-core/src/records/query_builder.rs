@@ -139,7 +139,7 @@ impl SelectQueryBuilder {
     .render()
     .map_err(|err| RecordError::Internal(err.into()))?;
 
-    return Ok(state.conn().query_row(&sql, [pk_value]).await?);
+    return Ok(state.conn().read_query_row(&sql, [pk_value]).await?);
   }
 
   pub(crate) async fn run_expanded(
@@ -166,7 +166,7 @@ impl SelectQueryBuilder {
     .render()
     .map_err(|err| RecordError::Internal(err.into()))?;
 
-    let Some(mut row) = state.conn().query_row(&sql, [pk_value]).await? else {
+    let Some(mut row) = state.conn().read_query_row(&sql, [pk_value]).await? else {
       return Ok(vec![]);
     };
 
@@ -201,7 +201,7 @@ impl GetFileQueryBuilder {
 
         let Some(row) = state
           .conn()
-          .query_row(
+          .read_query_row(
             &format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
             [pk_value],
           )
@@ -236,7 +236,7 @@ impl GetFilesQueryBuilder {
 
         let Some(row) = state
           .conn()
-          .query_row(
+          .read_query_row(
             &format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
             [pk_value],
           )

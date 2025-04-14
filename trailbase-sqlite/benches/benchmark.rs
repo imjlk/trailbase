@@ -136,7 +136,7 @@ fn insert_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 2,
+          n_read_threads: 2,
           ..Default::default()
         }),
       )?);
@@ -148,7 +148,7 @@ fn insert_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 4,
+          n_read_threads: 4,
           ..Default::default()
         }),
       )?);
@@ -160,7 +160,7 @@ fn insert_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 8,
+          n_read_threads: 8,
           ..Default::default()
         }),
       )?);
@@ -205,7 +205,7 @@ fn async_read_benchmark<C: AsyncConnection + 'static>(
       let conn = conn.clone();
       return runtime.spawn(async move {
         conn
-          .async_query::<i64>(
+          .async_read_query::<i64>(
             "SELECT id FROM 'read_table' WHERE id = ?1",
             [Value::Integer((i as usize % n) as i64)],
           )
@@ -274,7 +274,7 @@ fn read_benchmark_group(c: &mut Criterion) {
         return Ok(Connection::new(
           || rusqlite::Connection::open(&fname),
           Some(Options {
-            n_threads: 2,
+            n_read_threads: 2,
             ..Default::default()
           }),
         )?);
@@ -291,7 +291,7 @@ fn read_benchmark_group(c: &mut Criterion) {
         return Ok(Connection::new(
           || rusqlite::Connection::open(&fname),
           Some(Options {
-            n_threads: 4,
+            n_read_threads: 4,
             ..Default::default()
           }),
         )?);
@@ -308,7 +308,7 @@ fn read_benchmark_group(c: &mut Criterion) {
         return Ok(Connection::new(
           || rusqlite::Connection::open(&fname),
           Some(Options {
-            n_threads: 8,
+            n_read_threads: 8,
             ..Default::default()
           }),
         )?);
@@ -357,14 +357,14 @@ fn async_mixed_benchmark<C: AsyncConnection + 'static>(
 ) {
   async fn fast_read_query<C: AsyncConnection>(conn: &C, i: i64) {
     conn
-      .async_query::<i64>("SELECT prop FROM 'A' WHERE id = ?1", [Value::Integer(i)])
+      .async_read_query::<i64>("SELECT prop FROM 'A' WHERE id = ?1", [Value::Integer(i)])
       .await
       .unwrap();
   }
 
   async fn slow_read_query<C: AsyncConnection>(conn: &C, i: i64) {
     conn
-      .async_query::<i64>(
+      .async_read_query::<i64>(
         "SELECT A.id, B.id FROM A LEFT JOIN Bridge ON A.id = Bridge.a LEFT JOIN B ON Bridge.b = B.id WHERE A.id = ?1",
         [Value::Integer(i)],
       )
@@ -477,7 +477,7 @@ fn mixed_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 2,
+          n_read_threads: 2,
           ..Default::default()
         }),
       )?);
@@ -494,7 +494,7 @@ fn mixed_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 4,
+          n_read_threads: 4,
           ..Default::default()
         }),
       )?);
@@ -511,7 +511,7 @@ fn mixed_benchmark_group(c: &mut Criterion) {
       return Ok(Connection::new(
         || rusqlite::Connection::open(&fname),
         Some(Options {
-          n_threads: 8,
+          n_read_threads: 8,
           ..Default::default()
         }),
       )?);

@@ -87,7 +87,7 @@ pub async fn init_app_state(
         return Ok(conn);
       },
       Some(trailbase_sqlite::connection::Options {
-        n_threads: 6,
+        n_read_threads: 4,
         ..Default::default()
       }),
     )?;
