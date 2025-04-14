@@ -175,7 +175,7 @@ mod tests {
     let _ = create_table_handler(State(state.clone()), Json(create_table_request.clone())).await?;
 
     conn
-      .read_query_rows(&format!("SELECT {pk_col} FROM foo"), ())
+      .read_query_rows(format!("SELECT {pk_col} FROM foo"), ())
       .await?;
 
     {
@@ -190,7 +190,7 @@ mod tests {
         .unwrap();
 
       conn
-        .read_query_rows(&format!("SELECT {pk_col} FROM foo"), ())
+        .read_query_rows(format!("SELECT {pk_col} FROM foo"), ())
         .await?;
     }
 
@@ -219,7 +219,7 @@ mod tests {
         .unwrap();
 
       conn
-        .read_query_rows(&format!("SELECT {pk_col}, new FROM foo"), ())
+        .read_query_rows(format!("SELECT {pk_col}, new FROM foo"), ())
         .await?;
     }
 
@@ -242,7 +242,7 @@ mod tests {
 
       assert!(conn.read_query_rows("SELECT * FROM foo", ()).await.is_err());
       conn
-        .read_query_rows(&format!("SELECT {pk_col} FROM bar"), ())
+        .read_query_rows(format!("SELECT {pk_col} FROM bar"), ())
         .await?;
     }
 

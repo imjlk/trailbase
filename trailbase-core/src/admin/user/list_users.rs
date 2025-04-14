@@ -82,7 +82,7 @@ pub async fn list_users_handler(
 
   let total_row_count: i64 = conn
     .read_query_row_f(
-      &format!(
+      format!(
         "SELECT COUNT(*) FROM {USER_TABLE} WHERE {where_clause}",
         where_clause = filter_where_clause.clause
       ),
@@ -162,6 +162,6 @@ async fn fetch_users(
     "#,
   );
 
-  let users = conn.read_query_values::<DbUser>(&sql_query, params).await?;
+  let users = conn.read_query_values::<DbUser>(sql_query, params).await?;
   return Ok(users);
 }

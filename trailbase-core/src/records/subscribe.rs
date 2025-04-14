@@ -520,7 +520,7 @@ impl SubscriptionManager {
       .state
       .conn
       .read_query_row_f(
-        &format!(r#"SELECT _rowid_ FROM "{table_name}" WHERE "{pk_column}" = $1"#),
+        format!(r#"SELECT _rowid_ FROM "{table_name}" WHERE "{pk_column}" = $1"#),
         [record],
         |row| row.get(0),
       )

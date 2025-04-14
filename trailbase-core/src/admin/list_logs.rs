@@ -127,7 +127,7 @@ pub async fn list_logs_handler(
 
   let total_row_count: i64 = conn
     .read_query_row_f(
-      &format!(
+      format!(
         "SELECT COUNT(*) FROM {LOGS_TABLE_NAME} WHERE {where_clause}",
         where_clause = filter_where_clause.clause
       ),
@@ -246,7 +246,7 @@ async fn fetch_logs(
 
   return Ok(
     conn
-      .read_query_values::<LogEntry>(&sql_query, params)
+      .read_query_values::<LogEntry>(sql_query, params)
       .await?,
   );
 }
@@ -320,7 +320,7 @@ async fn fetch_aggregate_stats(
     params.extend(filter.params.clone())
   }
 
-  let rows = conn.read_query_values::<AggRow>(&qps_query, params).await?;
+  let rows = conn.read_query_values::<AggRow>(qps_query, params).await?;
 
   let mut rate: Vec<(i64, f64)> = vec![];
   for r in rows.iter() {
@@ -353,7 +353,7 @@ async fn fetch_aggregate_stats(
   "#
     );
 
-    let rows = conn.read_query_rows(&cc_query, ()).await?;
+    let rows = conn.read_query_rows(cc_query, ()).await?;
 
     let mut country_codes = HashMap::<String, usize>::new();
     for row in rows.iter() {
@@ -414,7 +414,7 @@ mod tests {
       let smack_in_there1 = (from + Duration::seconds(12 * 3600 + 1)).timestamp();
 
       conn
-        .execute_batch(&format!(
+        .execute_batch(format!(
           r#"
             INSERT INTO {LOGS_TABLE_NAME} (created) VALUES({before});
             INSERT INTO {LOGS_TABLE_NAME} (created) VALUES({after});

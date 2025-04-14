@@ -183,7 +183,7 @@ mod tests {
       return state
         .conn()
         .read_query_value::<TestTable>(
-          &format!("SELECT * FROM {table_name} WHERE _rowid_ = ?1"),
+          format!("SELECT * FROM {table_name} WHERE _rowid_ = ?1"),
           trailbase_sqlite::params!(row_id),
         )
         .await
@@ -203,7 +203,7 @@ mod tests {
 
     let count = || async {
       conn
-        .read_query_row_f(&format!("SELECT COUNT(*) FROM '{table_name}'"), (), |row| {
+        .read_query_row_f(format!("SELECT COUNT(*) FROM '{table_name}'"), (), |row| {
           row.get::<_, i64>(0)
         })
         .await

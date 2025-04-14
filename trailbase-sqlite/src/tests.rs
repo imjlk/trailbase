@@ -1,6 +1,7 @@
 use rusqlite::ffi;
 use rusqlite::hooks::PreUpdateCase;
 use serde::Deserialize;
+use std::borrow::Cow;
 
 use crate::connection::extract_row_id;
 use crate::{named_params, params, Connection, Error, Value, ValueType};
@@ -201,7 +202,7 @@ async fn test_call_libsql_query() {
     .unwrap();
 
   let rows = conn
-    .read_query_rows("SELECT * FROM person", ())
+    .read_query_rows(Cow::Borrowed("SELECT * FROM person"), ())
     .await
     .unwrap();
   assert_eq!(2, rows.len());

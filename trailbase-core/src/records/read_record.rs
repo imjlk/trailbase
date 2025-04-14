@@ -288,7 +288,7 @@ mod test {
     const EMAIL: &str = "foo@bar.baz";
     conn
       .execute(
-        &format!(r#"INSERT INTO "{USER_TABLE}" (email) VALUES ($1)"#),
+        format!(r#"INSERT INTO "{USER_TABLE}" (email) VALUES ($1)"#),
         trailbase_sqlite::params!(EMAIL),
       )
       .await
@@ -296,7 +296,7 @@ mod test {
 
     let count: i64 = conn
       .read_query_row_f(
-        &format!(r#"SELECT COUNT(*) from "{USER_TABLE}" WHERE email = :email"#),
+        format!(r#"SELECT COUNT(*) from "{USER_TABLE}" WHERE email = :email"#),
         trailbase_sqlite::named_params! {
           ":email": EMAIL,
           ":unused": "unused",
@@ -427,7 +427,7 @@ mod test {
     let conn = state.conn();
     conn
       .execute(
-        &format!(
+        format!(
           r#"CREATE TABLE 'table' (
             id           BLOB PRIMARY KEY NOT NULL CHECK(is_uuid_v7(id)) DEFAULT(uuid_v7()),
             file         TEXT CHECK(jsonschema('std.FileUpload', file)),
@@ -734,7 +734,7 @@ mod test {
     let view_name = "view";
     conn
       .execute(
-        &format!("CREATE VIEW '{view_name}' AS SELECT * FROM {table_name}"),
+        format!("CREATE VIEW '{view_name}' AS SELECT * FROM {table_name}"),
         (),
       )
       .await

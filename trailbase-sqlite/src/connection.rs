@@ -131,7 +131,7 @@ impl Connection {
   }
 
   #[inline]
-  pub async fn call_reader<F, R>(&self, function: F) -> Result<R>
+  async fn call_reader<F, R>(&self, function: F) -> Result<R>
   where
     F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
     R: Send + 'static,
@@ -149,13 +149,12 @@ impl Connection {
   /// Query SQL statement.
   pub async fn read_query_rows(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Rows> {
-    let sql = sql.to_string();
     return self
       .call_reader(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
         assert!(stmt.readonly());
 
         params.bind(&mut stmt)?;
@@ -167,13 +166,12 @@ impl Connection {
 
   pub async fn write_query_rows(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Rows> {
-    let sql = sql.to_string();
     return self
       .call(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
 
         params.bind(&mut stmt)?;
         let rows = stmt.raw_query();
@@ -184,36 +182,27 @@ impl Connection {
 
   pub async fn read_query_row(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Option<Row>> {
-    let sql = sql.to_string();
     return self
-      .call_reader(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
-        assert!(stmt.readonly());
-        params.bind(&mut stmt)?;
-
-        let mut rows = stmt.raw_query();
-        if let Some(row) = rows.next()? {
-          return Ok(Some(Row::from_row(row, None)?));
-        }
-        Ok(None)
-      })
+      .read_query_row_f(sql, params, |row| Row::from_row(row, None))
       .await;
   }
 
-  pub async fn query_row_f<T: Send + 'static>(
+  pub async fn query_row_f<T, E>(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
-    f: impl (FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>) + Send + 'static,
-  ) -> Result<Option<T>> {
-    let sql = sql.to_string();
-
+    f: impl (FnOnce(&rusqlite::Row<'_>) -> std::result::Result<T, E>) + Send + 'static,
+  ) -> Result<Option<T>>
+  where
+    T: Send + 'static,
+    crate::error::Error: From<E>,
+  {
     return self
       .call(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
         params.bind(&mut stmt)?;
 
         let mut rows = { stmt.raw_query() };
@@ -226,17 +215,19 @@ impl Connection {
       .await;
   }
 
-  pub async fn read_query_row_f<T: Send + 'static>(
+  pub async fn read_query_row_f<T, E>(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
-    f: impl (FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>) + Send + 'static,
-  ) -> Result<Option<T>> {
-    let sql = sql.to_string();
-
+    f: impl (FnOnce(&rusqlite::Row<'_>) -> std::result::Result<T, E>) + Send + 'static,
+  ) -> Result<Option<T>>
+  where
+    T: Send + 'static,
+    crate::error::Error: From<E>,
+  {
     return self
       .call_reader(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
         assert!(stmt.readonly());
 
         params.bind(&mut stmt)?;
@@ -253,54 +244,36 @@ impl Connection {
 
   pub async fn read_query_value<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Option<T>> {
-    let sql = sql.to_string();
     return self
-      .call_reader(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
-        assert!(stmt.readonly());
-
-        params.bind(&mut stmt)?;
-        let mut rows = stmt.raw_query();
-        if let Some(row) = rows.next()? {
-          return Ok(Some(serde_rusqlite::from_row(row)?));
-        }
-        Ok(None)
+      .read_query_row_f(sql, params, |row| -> std::result::Result<T, Error> {
+        return Ok(serde_rusqlite::from_row(row)?);
       })
       .await;
   }
 
   pub async fn write_query_value<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Option<T>> {
-    let sql = sql.to_string();
     return self
-      .call(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
-
-        params.bind(&mut stmt)?;
-        let mut rows = stmt.raw_query();
-        if let Some(row) = rows.next()? {
-          return Ok(Some(serde_rusqlite::from_row(row)?));
-        }
-        Ok(None)
+      .query_row_f(sql, params, |row| -> std::result::Result<T, Error> {
+        return Ok(serde_rusqlite::from_row(row)?);
       })
       .await;
   }
 
   pub async fn read_query_values<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
-    sql: &str,
+    sql: impl AsRef<str> + Send + 'static,
     params: impl Params + Send + 'static,
   ) -> Result<Vec<T>> {
-    let sql = sql.to_string();
     return self
       .call_reader(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
         assert!(stmt.readonly());
 
         params.bind(&mut stmt)?;
@@ -316,11 +289,14 @@ impl Connection {
   }
 
   /// Execute SQL statement.
-  pub async fn execute(&self, sql: &str, params: impl Params + Send + 'static) -> Result<usize> {
-    let sql = sql.to_string();
+  pub async fn execute(
+    &self,
+    sql: impl AsRef<str> + Send + 'static,
+    params: impl Params + Send + 'static,
+  ) -> Result<usize> {
     return self
       .call(move |conn: &mut rusqlite::Connection| {
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(sql.as_ref())?;
         params.bind(&mut stmt)?;
 
         let n = stmt.raw_execute()?;
@@ -331,11 +307,10 @@ impl Connection {
   }
 
   /// Batch execute SQL statements and return rows of last statement.
-  pub async fn execute_batch(&self, sql: &str) -> Result<Option<Rows>> {
-    let sql = sql.to_string();
+  pub async fn execute_batch(&self, sql: impl AsRef<str> + Send + 'static) -> Result<Option<Rows>> {
     return self
       .call(move |conn: &mut rusqlite::Connection| {
-        let batch = rusqlite::Batch::new(conn, &sql);
+        let batch = rusqlite::Batch::new(conn, sql.as_ref());
 
         let mut p = batch.peekable();
         while let Ok(Some(mut stmt)) = p.next() {
@@ -407,7 +382,18 @@ impl Connection {
       return Ok(());
     };
 
-    return result.map_err(|e| Error::Close(self, e));
+    loop {
+      let (sender, receiver) = oneshot::channel::<std::result::Result<(), rusqlite::Error>>();
+      if let Err(crossbeam_channel::SendError(_)) = self.state.reader.send(Message::Close(sender)) {
+        break;
+      }
+      let Ok(_result) = receiver.await else {
+        break;
+      };
+    }
+
+    result.map_err(|e| Error::Close(self, e))?;
+    return Ok(());
   }
 }
 

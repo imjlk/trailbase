@@ -22,7 +22,7 @@ async fn get_avatar_url(state: &AppState, user: &DbUser) -> Option<String> {
 
   let has_avatar = state
     .user_conn()
-    .read_query_row_f(&QUERY, params!(user.id), |row| row.get::<_, bool>(0))
+    .read_query_row_f(&*QUERY, params!(user.id), |row| row.get::<_, bool>(0))
     .await
     .map_err(|err| {
       log::debug!("avatar query broken?");
@@ -209,7 +209,7 @@ mod tests {
 
     let db_user = state
       .user_conn()
-      .read_query_value::<DbUser>(&QUERY, (email,))
+      .read_query_value::<DbUser>(&*QUERY, (email,))
       .await
       .unwrap()
       .unwrap();

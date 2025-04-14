@@ -385,7 +385,7 @@ impl RuntimeSingleton {
         };
 
         let rows = conn
-          .write_query_rows(&query, params)
+          .write_query_rows(query, params)
           .await
           .map_err(|err| rustyscript::Error::Runtime(err.to_string()))?;
 
@@ -414,7 +414,7 @@ impl RuntimeSingleton {
         };
 
         let rows_affected = conn
-          .execute(&query, params)
+          .execute(query, params)
           .await
           .map_err(|err| rustyscript::Error::Runtime(err.to_string()))?;
 

@@ -42,7 +42,7 @@ pub async fn list_tables_handler(
   let rows = state
     .conn()
     .read_query_values::<SqliteSchema>(
-      &format!("SELECT type, name, tbl_name, sql FROM {SQLITE_SCHEMA_TABLE} ORDER BY type"),
+      format!("SELECT type, name, tbl_name, sql FROM {SQLITE_SCHEMA_TABLE} ORDER BY type"),
       (),
     )
     .await?;

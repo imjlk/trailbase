@@ -163,7 +163,7 @@ pub async fn init_app_state(
     let num_admins: i64 = app_state
       .user_conn()
       .read_query_row_f(
-        &format!("SELECT COUNT(*) FROM {USER_TABLE} WHERE admin = TRUE"),
+        format!("SELECT COUNT(*) FROM {USER_TABLE} WHERE admin = TRUE"),
         (),
         |row| row.get(0),
       )
@@ -177,7 +177,7 @@ pub async fn init_app_state(
       app_state
         .user_conn()
         .execute(
-          &format!(
+          format!(
             r#"
         INSERT INTO {USER_TABLE}
           (email, password_hash, verified, admin)

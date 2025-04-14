@@ -31,10 +31,9 @@ impl AsyncConnection for Connection {
     sql: impl Into<String> + Send,
     params: impl Into<Vec<Value>> + Send,
   ) -> Result<T, BenchmarkError> {
-    let sql: String = sql.into();
     return Ok(
       self
-        .query_row_f(&sql, params.into(), |row| Ok(row.get::<_, T>(0)?))
+        .query_row_f(sql.into(), params.into(), |row| row.get::<_, T>(0))
         .await?
         .unwrap(),
     );
@@ -45,10 +44,9 @@ impl AsyncConnection for Connection {
     sql: impl Into<String> + Send,
     params: impl Into<Vec<Value>> + Send,
   ) -> Result<T, BenchmarkError> {
-    let sql: String = sql.into();
     return Ok(
       self
-        .read_query_row_f(&sql, params.into(), |row| Ok(row.get::<_, T>(0)?))
+        .read_query_row_f(sql.into(), params.into(), |row| row.get::<_, T>(0))
         .await?
         .unwrap(),
     );
@@ -59,23 +57,8 @@ impl AsyncConnection for Connection {
     sql: impl Into<String> + Send,
     params: impl Into<Vec<Value>> + Send,
   ) -> Result<(), BenchmarkError> {
-    let sql: String = sql.into();
-    let params: Vec<Value> = params.into();
-    return Ok(
-      self
-        .call(
-          move |conn: &mut rusqlite::Connection| -> Result<_, trailbase_sqlite::Error> {
-            let mut stmt = conn.prepare_cached(&sql)?;
-            for (idx, v) in params.into_iter().enumerate() {
-              stmt.raw_bind_parameter(idx + 1, v)?;
-            }
-            let _ = stmt.raw_execute();
-
-            return Ok(());
-          },
-        )
-        .await?,
-    );
+    self.execute(sql.into(), params.into()).await?;
+    return Ok(());
   }
 }
 

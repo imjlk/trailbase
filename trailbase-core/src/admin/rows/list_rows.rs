@@ -77,7 +77,7 @@ pub async fn list_rows_handler(
     let count_query = format!("SELECT COUNT(*) FROM '{table_name}' WHERE {where_clause}");
     state
       .conn()
-      .read_query_row_f(&count_query, filter_where_clause.params.clone(), |row| {
+      .read_query_row_f(count_query, filter_where_clause.params.clone(), |row| {
         row.get(0)
       })
       .await?
@@ -209,12 +209,15 @@ async fn fetch_rows(
     "#,
   );
 
-  let result_rows = conn.read_query_rows(&query, params).await.map_err(|err| {
-    #[cfg(debug_assertions)]
-    error!("QUERY: {query}\n\t=> {err}");
+  let result_rows = conn
+    .read_query_rows(query.clone(), params)
+    .await
+    .map_err(|err| {
+      #[cfg(debug_assertions)]
+      error!("QUERY: {query}\n\t=> {err}");
 
-    return err;
-  })?;
+      return err;
+    })?;
 
   return Ok(rows_to_json_arrays(result_rows, 1024)?);
 }

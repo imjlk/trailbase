@@ -208,7 +208,9 @@ async fn test_record_apis() {
     .read_query_row_f(
       "SELECT client_ip, latency, status FROM _logs WHERE client_ip = $1",
       trailbase_sqlite::params!(client_ip),
-      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+      |row| -> Result<_, rusqlite::Error> {
+        return Ok((row.get(0)?, row.get(1)?, row.get(2)?));
+      },
     )
     .await
     .unwrap()

@@ -139,7 +139,7 @@ impl SelectQueryBuilder {
     .render()
     .map_err(|err| RecordError::Internal(err.into()))?;
 
-    return Ok(state.conn().read_query_row(&sql, [pk_value]).await?);
+    return Ok(state.conn().read_query_row(sql, [pk_value]).await?);
   }
 
   pub(crate) async fn run_expanded(
@@ -166,7 +166,7 @@ impl SelectQueryBuilder {
     .render()
     .map_err(|err| RecordError::Internal(err.into()))?;
 
-    let Some(mut row) = state.conn().read_query_row(&sql, [pk_value]).await? else {
+    let Some(mut row) = state.conn().read_query_row(sql, [pk_value]).await? else {
       return Ok(vec![]);
     };
 
@@ -202,7 +202,7 @@ impl GetFileQueryBuilder {
         let Some(row) = state
           .conn()
           .read_query_row(
-            &format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
+            format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
             [pk_value],
           )
           .await?
@@ -237,7 +237,7 @@ impl GetFilesQueryBuilder {
         let Some(row) = state
           .conn()
           .read_query_row(
-            &format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
+            format!(r#"SELECT "{column_name}" FROM "{table_name}" WHERE "{pk_column}" = $1"#),
             [pk_value],
           )
           .await?
@@ -291,7 +291,9 @@ impl InsertQueryBuilder {
 
     let (rowid, return_value): (i64, rusqlite::types::Value) = state
       .conn()
-      .query_row_f(&query, named_params, |row| Ok((row.get(0)?, row.get(1)?)))
+      .query_row_f(query, named_params, |row| -> Result<_, rusqlite::Error> {
+        return Ok((row.get(0)?, row.get(1)?));
+      })
       .await?
       .ok_or_else(|| trailbase_sqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
@@ -454,7 +456,7 @@ impl UpdateQueryBuilder {
 
     let rowid: Option<i64> = state
       .conn()
-      .query_row_f(&query, params.named_params, |row| row.get(0))
+      .query_row_f(query, params.named_params, |row| row.get(0))
       .await?;
 
     // Successful write, do not cleanup written files.
@@ -483,7 +485,7 @@ impl DeleteQueryBuilder {
     let rowid: i64 = state
       .conn()
       .query_row_f(
-        &format!(r#"DELETE FROM "{table_name}" WHERE "{pk_column}" = $1 RETURNING _rowid_"#),
+        format!(r#"DELETE FROM "{table_name}" WHERE "{pk_column}" = $1 RETURNING _rowid_"#),
         [pk_value],
         |row| row.get(0),
       )

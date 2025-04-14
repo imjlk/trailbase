@@ -355,7 +355,7 @@ fn build_job(
 
             user_conn
               .execute(
-                &format!("DELETE FROM '{SESSION_TABLE}' WHERE updated < $1"),
+                format!("DELETE FROM '{SESSION_TABLE}' WHERE updated < $1"),
                 params!(timestamp),
               )
               .await
