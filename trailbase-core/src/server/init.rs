@@ -162,9 +162,10 @@ pub async fn init_app_state(
   if new_db {
     let num_admins: i64 = app_state
       .user_conn()
-      .query_value(
+      .read_query_row_f(
         &format!("SELECT COUNT(*) FROM {USER_TABLE} WHERE admin = TRUE"),
         (),
+        |row| row.get(0),
       )
       .await?
       .unwrap_or(0);

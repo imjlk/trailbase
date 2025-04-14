@@ -181,7 +181,7 @@ pub async fn force_password_reset(
   }
 
   return user_conn
-    .query_value(&UPDATE_PASSWORD_QUERY, params!(hashed_password, email))
+    .write_query_value(&UPDATE_PASSWORD_QUERY, params!(hashed_password, email))
     .await?
     .ok_or(AuthError::NotFound);
 }

@@ -1,5 +1,4 @@
 use crossbeam_channel::{Receiver, Sender};
-// use parking_lot::RwLock;
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::Value;
@@ -62,7 +61,6 @@ impl Default for Options {
 struct ConnectionState {
   reader: Sender<Message>,
   writer: Sender<Message>,
-  // lock: Arc<RwLock<()>>,
 }
 
 /// A handle to call functions in background thread.
@@ -104,7 +102,6 @@ impl Connection {
           shared_write_sender.clone()
         },
         writer: shared_write_sender,
-        // lock: Arc::new(RwLock::new(())),
       }),
     });
   }
@@ -150,11 +147,17 @@ impl Connection {
   }
 
   /// Query SQL statement.
-  pub async fn query(&self, sql: &str, params: impl Params + Send + 'static) -> Result<Rows> {
+  pub async fn read_query_rows(
+    &self,
+    sql: &str,
+    params: impl Params + Send + 'static,
+  ) -> Result<Rows> {
     let sql = sql.to_string();
     return self
-      .call(move |conn: &mut rusqlite::Connection| {
+      .call_reader(move |conn: &mut rusqlite::Connection| {
         let mut stmt = conn.prepare_cached(&sql)?;
+        assert!(stmt.readonly());
+
         params.bind(&mut stmt)?;
         let rows = stmt.raw_query();
         Ok(Rows::from_rows(rows)?)
@@ -162,21 +165,19 @@ impl Connection {
       .await;
   }
 
-  pub async fn query_row(
+  pub async fn write_query_rows(
     &self,
     sql: &str,
     params: impl Params + Send + 'static,
-  ) -> Result<Option<Row>> {
+  ) -> Result<Rows> {
     let sql = sql.to_string();
     return self
       .call(move |conn: &mut rusqlite::Connection| {
         let mut stmt = conn.prepare_cached(&sql)?;
+
         params.bind(&mut stmt)?;
-        let mut rows = stmt.raw_query();
-        if let Some(row) = rows.next()? {
-          return Ok(Some(Row::from_row(row, None)?));
-        }
-        Ok(None)
+        let rows = stmt.raw_query();
+        Ok(Rows::from_rows(rows)?)
       })
       .await;
   }
@@ -206,20 +207,16 @@ impl Connection {
     &self,
     sql: &str,
     params: impl Params + Send + 'static,
-    f: impl (FnOnce(&rusqlite::Row<'_>) -> Result<T>) + Send + 'static,
+    f: impl (FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>) + Send + 'static,
   ) -> Result<Option<T>> {
     let sql = sql.to_string();
-    // let lock = self.state.lock.clone();
 
     return self
       .call(move |conn: &mut rusqlite::Connection| {
         let mut stmt = conn.prepare_cached(&sql)?;
         params.bind(&mut stmt)?;
 
-        let mut rows = {
-          // let _write_lock = lock.write();
-          stmt.raw_query()
-        };
+        let mut rows = { stmt.raw_query() };
 
         if let Some(row) = rows.next()? {
           return Ok(Some(f(row)?));
@@ -233,10 +230,9 @@ impl Connection {
     &self,
     sql: &str,
     params: impl Params + Send + 'static,
-    f: impl (FnOnce(&rusqlite::Row<'_>) -> Result<T>) + Send + 'static,
+    f: impl (FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>) + Send + 'static,
   ) -> Result<Option<T>> {
     let sql = sql.to_string();
-    // let lock = self.state.lock.clone();
 
     return self
       .call_reader(move |conn: &mut rusqlite::Connection| {
@@ -245,10 +241,7 @@ impl Connection {
 
         params.bind(&mut stmt)?;
 
-        let mut rows = {
-          // let _read_lock = lock.read();
-          stmt.raw_query()
-        };
+        let mut rows = { stmt.raw_query() };
 
         if let Some(row) = rows.next()? {
           return Ok(Some(f(row)?));
@@ -258,15 +251,17 @@ impl Connection {
       .await;
   }
 
-  pub async fn query_value<T: serde::de::DeserializeOwned + Send + 'static>(
+  pub async fn read_query_value<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
     sql: &str,
     params: impl Params + Send + 'static,
   ) -> Result<Option<T>> {
     let sql = sql.to_string();
     return self
-      .call(move |conn: &mut rusqlite::Connection| {
+      .call_reader(move |conn: &mut rusqlite::Connection| {
         let mut stmt = conn.prepare_cached(&sql)?;
+        assert!(stmt.readonly());
+
         params.bind(&mut stmt)?;
         let mut rows = stmt.raw_query();
         if let Some(row) = rows.next()? {
@@ -277,15 +272,37 @@ impl Connection {
       .await;
   }
 
-  pub async fn query_values<T: serde::de::DeserializeOwned + Send + 'static>(
+  pub async fn write_query_value<T: serde::de::DeserializeOwned + Send + 'static>(
+    &self,
+    sql: &str,
+    params: impl Params + Send + 'static,
+  ) -> Result<Option<T>> {
+    let sql = sql.to_string();
+    return self
+      .call(move |conn: &mut rusqlite::Connection| {
+        let mut stmt = conn.prepare_cached(&sql)?;
+
+        params.bind(&mut stmt)?;
+        let mut rows = stmt.raw_query();
+        if let Some(row) = rows.next()? {
+          return Ok(Some(serde_rusqlite::from_row(row)?));
+        }
+        Ok(None)
+      })
+      .await;
+  }
+
+  pub async fn read_query_values<T: serde::de::DeserializeOwned + Send + 'static>(
     &self,
     sql: &str,
     params: impl Params + Send + 'static,
   ) -> Result<Vec<T>> {
     let sql = sql.to_string();
     return self
-      .call(move |conn: &mut rusqlite::Connection| {
+      .call_reader(move |conn: &mut rusqlite::Connection| {
         let mut stmt = conn.prepare_cached(&sql)?;
+        assert!(stmt.readonly());
+
         params.bind(&mut stmt)?;
         let mut rows = stmt.raw_query();
 

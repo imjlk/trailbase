@@ -75,7 +75,7 @@ pub(crate) async fn auth_code_to_token_handler(
 
   let Some(db_user) = state
     .user_conn()
-    .query_value::<DbUser>(
+    .write_query_value::<DbUser>(
       &UPDATE_QUERY,
       params!(authorization_code, pkce_code_challenge),
     )

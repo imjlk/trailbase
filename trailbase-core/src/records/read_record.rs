@@ -294,18 +294,21 @@ mod test {
       .await
       .unwrap();
 
-    conn
-      .query_row(
-        &format!(r#"SELECT * from "{USER_TABLE}" WHERE email = :email"#),
+    let count: i64 = conn
+      .read_query_row_f(
+        &format!(r#"SELECT COUNT(*) from "{USER_TABLE}" WHERE email = :email"#),
         trailbase_sqlite::named_params! {
           ":email": EMAIL,
           ":unused": "unused",
           ":foo": 42,
         },
+        |row| row.get(0),
       )
       .await
       .unwrap()
       .unwrap();
+
+    assert_eq!(1, count);
   }
 
   #[tokio::test]

@@ -55,7 +55,7 @@ async fn get_user_by_email(
   email: &str,
 ) -> Result<DbUser, BoxError> {
   if let Some(user) = conn
-    .query_value::<DbUser>(
+    .read_query_value::<DbUser>(
       &format!("SELECT * FROM {USER_TABLE} WHERE email = $1"),
       (email.to_string(),),
     )
@@ -165,7 +165,7 @@ async fn async_main() -> Result<(), BoxError> {
       match cmd {
         Some(AdminSubCommands::List) => {
           let users = conn
-            .query_values::<DbUser>(&format!("SELECT * FROM {USER_TABLE} WHERE admin > 0"), ())
+            .read_query_values::<DbUser>(&format!("SELECT * FROM {USER_TABLE} WHERE admin > 0"), ())
             .await?;
 
           println!("{: >36}\temail\tcreated\tupdated", "id");

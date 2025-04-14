@@ -427,28 +427,16 @@ impl RecordApi {
     };
 
     let params = self.build_named_params(p, record_id, request_params, user)?;
-    // let state = self.state.clone();
     let access_query = access_query.to_string();
 
     match self
       .state
       .conn
-      .call(move |conn| {
-        // let access_query = state.cached_access_query(p).unwrap();
-        let mut stmt = conn.prepare_cached(&access_query)?;
-        params.bind(&mut stmt)?;
-
-        let mut rows = stmt.raw_query();
-        if let Some(row) = rows.next()? {
-          return Ok(row.get(0)?);
-        }
-
-        return Err(rusqlite::Error::QueryReturnedNoRows.into());
-      })
+      .read_query_row_f(&access_query, params, |row| row.get(0))
       .await
     {
       Ok(allowed) => {
-        if allowed {
+        if allowed.unwrap_or(false) {
           return Ok(());
         }
       }

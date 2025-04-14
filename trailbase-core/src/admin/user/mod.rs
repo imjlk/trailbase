@@ -20,7 +20,7 @@ pub async fn is_demo_admin(state: &AppState, id: &Uuid) -> bool {
   let userid: [u8; 16] = id.into_bytes();
   return match state
     .user_conn()
-    .query_value(
+    .read_query_value(
       &format!("SELECT EXISTS(SELECT * FROM {USER_TABLE} WHERE id=$1 AND email='admin@localhost')"),
       params!(userid),
     )

@@ -225,7 +225,7 @@ async fn create_user_for_external_provider(
   }
 
   let id: Uuid = conn
-    .query_value(
+    .write_query_value(
       &QUERY,
       named_params! {
           ":provider_id": user.provider_id as i64,
@@ -252,7 +252,7 @@ async fn user_by_provider_id(
   };
 
   return conn
-    .query_value::<DbUser>(
+    .read_query_value::<DbUser>(
       &QUERY,
       params!(provider_id as i64, provider_user_id.to_string()),
     )

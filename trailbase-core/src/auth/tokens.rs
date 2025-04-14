@@ -216,7 +216,7 @@ pub(crate) async fn reauth_with_refresh_token(
 
   let Some(db_user) = state
     .user_conn()
-    .query_value::<DbUser>(
+    .read_query_value::<DbUser>(
       &QUERY,
       params!(refresh_token, refresh_token_ttl.num_seconds()),
     )

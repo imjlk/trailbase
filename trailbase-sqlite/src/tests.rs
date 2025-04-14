@@ -186,21 +186,24 @@ async fn test_call_libsql_query() {
   assert_eq!(0, result.unwrap());
 
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES ($1, $2)",
       params!(0, "foo"),
     )
     .await
     .unwrap();
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES (:id, :name)",
       named_params! {":id": 1, ":name": "bar"},
     )
     .await
     .unwrap();
 
-  let rows = conn.query("SELECT * FROM person", ()).await.unwrap();
+  let rows = conn
+    .read_query_rows("SELECT * FROM person", ())
+    .await
+    .unwrap();
   assert_eq!(2, rows.len());
   assert!(matches!(rows.column_type(0).unwrap(), ValueType::Integer));
   assert_eq!(rows.column_name(0).unwrap(), "id");
@@ -214,7 +217,7 @@ async fn test_call_libsql_query() {
     .unwrap();
 
   let row = conn
-    .query_row("SELECT name FROM person WHERE id = $1", &[1])
+    .read_query_row("SELECT name FROM person WHERE id = $1", &[1])
     .await
     .unwrap()
     .unwrap();
@@ -228,7 +231,7 @@ async fn test_call_libsql_query() {
   }
 
   let person = conn
-    .query_value::<Person>("SELECT * FROM person WHERE id = $1", &[1])
+    .read_query_value::<Person>("SELECT * FROM person WHERE id = $1", &[1])
     .await
     .unwrap()
     .unwrap();
@@ -272,7 +275,7 @@ async fn test_params() {
     .unwrap();
 
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES (:id, :name)",
       [
         (":id", Value::Integer(1)),
@@ -284,7 +287,7 @@ async fn test_params() {
 
   let id = 3;
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES (:id, :name)",
       named_params! {
           ":id": id,
@@ -295,7 +298,7 @@ async fn test_params() {
     .unwrap();
 
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES ($1, $2)",
       [Value::Integer(2), Value::Text("Bob".to_string())],
     )
@@ -303,16 +306,20 @@ async fn test_params() {
     .unwrap();
 
   conn
-    .query(
+    .execute(
       "INSERT INTO person (id, name) VALUES ($1, $2)",
       params!(4, "Jay"),
     )
     .await
     .unwrap();
 
-  let rows = conn.query("SELECT COUNT(*) FROM person", ()).await.unwrap();
+  let count: i64 = conn
+    .read_query_row_f("SELECT COUNT(*) FROM person", (), |row| row.get(0))
+    .await
+    .unwrap()
+    .unwrap();
 
-  assert_eq!(rows.0.get(0).unwrap().get::<i64>(0), Ok(4));
+  assert_eq!(4, count);
 }
 
 #[tokio::test]

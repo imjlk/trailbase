@@ -169,9 +169,10 @@ pub async fn lookup_and_parse_table_schema(
 ) -> Result<Table, TableLookupError> {
   // Then get the actual table.
   let sql: String = conn
-    .query_value(
+    .read_query_row_f(
       &format!("SELECT sql FROM {SQLITE_SCHEMA_TABLE} WHERE type = 'table' AND name = $1"),
       params!(table_name.to_string()),
+      |row| row.get(0),
     )
     .await?
     .ok_or_else(|| trailbase_sqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows))?;
@@ -188,7 +189,7 @@ pub async fn lookup_and_parse_all_table_schemas(
 ) -> Result<Vec<Table>, TableLookupError> {
   // Then get the actual table.
   let rows = conn
-    .query(
+    .read_query_rows(
       &format!("SELECT sql FROM {SQLITE_SCHEMA_TABLE} WHERE type = 'table'"),
       (),
     )
@@ -226,7 +227,7 @@ pub async fn lookup_and_parse_all_view_schemas(
 ) -> Result<Vec<View>, TableLookupError> {
   // Then get the actual table.
   let rows = conn
-    .query(
+    .read_query_rows(
       &format!("SELECT sql FROM {SQLITE_SCHEMA_TABLE} WHERE type = 'view'"),
       (),
     )

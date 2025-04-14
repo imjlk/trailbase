@@ -295,7 +295,10 @@ mod tests {
     })});
     insert(object.clone()).await.unwrap();
 
-    let rows = conn.query("SELECT * FROM test_table", ()).await.unwrap();
+    let rows = conn
+      .read_query_rows("SELECT * FROM test_table", ())
+      .await
+      .unwrap();
     let parsed = rows_to_json(
       &metadata.schema.columns,
       &metadata.json_metadata.columns,
