@@ -87,7 +87,11 @@ pub async fn init_app_state(
         return Ok(conn);
       },
       Some(trailbase_sqlite::connection::Options {
-        n_read_threads: 4,
+        n_read_threads: if let Ok(n) = std::thread::available_parallelism() {
+          n.get().clamp(2, 4)
+        } else {
+          4
+        },
         ..Default::default()
       }),
     )?;

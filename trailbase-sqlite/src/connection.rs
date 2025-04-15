@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
+use log::*;
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::Value;
@@ -58,51 +59,71 @@ impl Default for Options {
   }
 }
 
-struct ConnectionState {
+/// A handle to call functions in background thread.
+#[derive(Clone)]
+pub struct Connection {
   reader: Sender<Message>,
   writer: Sender<Message>,
 }
 
-/// A handle to call functions in background thread.
-#[derive(Clone)]
-pub struct Connection {
-  state: Arc<ConnectionState>,
-}
-
 impl Connection {
   pub fn new<E>(
-    c: impl Fn() -> std::result::Result<rusqlite::Connection, E>,
+    builder: impl Fn() -> std::result::Result<rusqlite::Connection, E>,
     opt: Option<Options>,
   ) -> std::result::Result<Self, E> {
-    let spawn = |receiver: Receiver<Message>| -> std::result::Result<(), E> {
-      let conn = c()?;
+    let n_read_threads = {
+      let n_read_threads = match opt.as_ref().map_or(0, |o| o.n_read_threads) {
+        1 => {
+          warn!(
+            "Using a single dedicated reader thread won't improve performance, falling back to 0."
+          );
+          0
+        }
+        n => n,
+      };
+
+      if let Ok(n) = std::thread::available_parallelism() {
+        if n_read_threads > n.get() {
+          debug!(
+            "Using {n_read_threads} exceeding hardware parallelism: {}",
+            n.get()
+          );
+        }
+      }
+
+      n_read_threads
+    };
+
+    let spawn = |receiver: Receiver<Message>| -> std::result::Result<String, E> {
+      let conn = builder()?;
+      let name = conn.path().unwrap_or_default().to_string();
       if let Some(timeout) = opt.as_ref().map(|o| o.busy_timeout) {
         conn.busy_timeout(timeout).expect("busy timeout failed");
       }
 
       std::thread::spawn(move || event_loop(conn, receiver));
 
-      return Ok(());
+      return Ok(name);
     };
 
     let (shared_write_sender, shared_write_receiver) = crossbeam_channel::unbounded::<Message>();
-    spawn(shared_write_receiver)?;
+    let name = spawn(shared_write_receiver)?;
 
-    let (shared_read_sender, shared_read_receiver) = crossbeam_channel::unbounded::<Message>();
-    let n_read_threads = opt.as_ref().map_or(0, |o| o.n_read_threads);
-    for _ in 0..n_read_threads {
-      spawn(shared_read_receiver.clone())?;
-    }
+    let shared_read_sender = if n_read_threads > 0 {
+      let (shared_read_sender, shared_read_receiver) = crossbeam_channel::unbounded::<Message>();
+      for _ in 0..n_read_threads {
+        spawn(shared_read_receiver.clone())?;
+      }
+      shared_read_sender
+    } else {
+      shared_write_sender.clone()
+    };
+
+    debug!("Opened SQLite DB '{name}' with {n_read_threads} dedicated reader threads");
 
     return Ok(Self {
-      state: Arc::new(ConnectionState {
-        reader: if n_read_threads > 0 {
-          shared_read_sender
-        } else {
-          shared_write_sender.clone()
-        },
-        writer: shared_write_sender,
-      }),
+      reader: shared_read_sender,
+      writer: shared_write_sender,
     });
   }
 
@@ -127,7 +148,14 @@ impl Connection {
     F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
     R: Send + 'static,
   {
-    return call_impl(&self.state.writer, function).await;
+    return call_impl(&self.writer, function).await;
+  }
+
+  #[inline]
+  pub fn call_and_forget(&self, function: impl FnOnce(&rusqlite::Connection) + Send + 'static) {
+    let _ = self
+      .writer
+      .send(Message::Run(Box::new(move |conn| function(conn))));
   }
 
   #[inline]
@@ -136,14 +164,7 @@ impl Connection {
     F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
     R: Send + 'static,
   {
-    return call_impl(&self.state.reader, function).await;
-  }
-
-  pub fn call_and_forget(&self, function: impl FnOnce(&rusqlite::Connection) + Send + 'static) {
-    let _ = self
-      .state
-      .writer
-      .send(Message::Run(Box::new(move |conn| function(conn))));
+    return call_impl(&self.reader, function).await;
   }
 
   /// Query SQL statement.
@@ -190,6 +211,7 @@ impl Connection {
       .await;
   }
 
+  #[inline]
   pub async fn query_row_f<T, E>(
     &self,
     sql: impl AsRef<str> + Send + 'static,
@@ -205,7 +227,7 @@ impl Connection {
         let mut stmt = conn.prepare_cached(sql.as_ref())?;
         params.bind(&mut stmt)?;
 
-        let mut rows = { stmt.raw_query() };
+        let mut rows = stmt.raw_query();
 
         if let Some(row) = rows.next()? {
           return Ok(Some(f(row)?));
@@ -215,6 +237,7 @@ impl Connection {
       .await;
   }
 
+  #[inline]
   pub async fn read_query_row_f<T, E>(
     &self,
     sql: impl AsRef<str> + Send + 'static,
@@ -232,7 +255,7 @@ impl Connection {
 
         params.bind(&mut stmt)?;
 
-        let mut rows = { stmt.raw_query() };
+        let mut rows = stmt.raw_query();
 
         if let Some(row) = rows.next()? {
           return Ok(Some(f(row)?));
@@ -248,9 +271,7 @@ impl Connection {
     params: impl Params + Send + 'static,
   ) -> Result<Option<T>> {
     return self
-      .read_query_row_f(sql, params, |row| -> std::result::Result<T, Error> {
-        return Ok(serde_rusqlite::from_row(row)?);
-      })
+      .read_query_row_f(sql, params, serde_rusqlite::from_row)
       .await;
   }
 
@@ -260,9 +281,7 @@ impl Connection {
     params: impl Params + Send + 'static,
   ) -> Result<Option<T>> {
     return self
-      .query_row_f(sql, params, |row| -> std::result::Result<T, Error> {
-        return Ok(serde_rusqlite::from_row(row)?);
-      })
+      .query_row_f(sql, params, serde_rusqlite::from_row)
       .await;
   }
 
@@ -353,46 +372,60 @@ impl Connection {
 
   /// Close the database connection.
   ///
-  /// This is functionally equivalent to the `Drop` implementation for
-  /// `Connection`. It consumes the `Connection`, but on error returns it
-  /// to the caller for retry purposes.
+  /// This is functionally equivalent to the `Drop` implementation for `Connection`. It consumes
+  /// the `Connection`, but on error returns it to the caller for retry purposes.
   ///
-  /// If successful, any following `close` operations performed
-  /// on `Connection` copies will succeed immediately.
-  ///
-  /// On the other hand, any calls to [`Connection::call`] will return a
-  /// [`Error::ConnectionClosed`], and any calls to [`Connection::call_unwrap`] will cause a
-  /// `panic`.
+  /// If successful, any following `close` operations performed on `Connection` copies will succeed
+  /// immediately.
   ///
   /// # Failure
   ///
   /// Will return `Err` if the underlying SQLite close call fails.
   pub async fn close(self) -> Result<()> {
-    let (sender, receiver) = oneshot::channel::<std::result::Result<(), rusqlite::Error>>();
+    // Returns true if connection was successfully closed.
+    let closer = async |s: &Sender<Message>| -> std::result::Result<bool, rusqlite::Error> {
+      let (sender, receiver) = oneshot::channel::<std::result::Result<(), rusqlite::Error>>();
+      if let Err(crossbeam_channel::SendError(_)) = s.send(Message::Close(sender)) {
+        // If the channel is closed on the other side, it means the connection closed successfully
+        // This is a safeguard against calling close on a `Copy` of the connection
+        return Ok(false);
+      }
 
-    if let Err(crossbeam_channel::SendError(_)) = self.state.writer.send(Message::Close(sender)) {
-      // If the channel is closed on the other side, it means the connection closed successfully
-      // This is a safeguard against calling close on a `Copy` of the connection
-      return Ok(());
-    }
+      let Ok(result) = receiver.await else {
+        // If we get a RecvError at this point, it also means the channel closed in the meantime
+        // we can assume the connection is closed
+        return Ok(false);
+      };
 
-    let Ok(result) = receiver.await else {
-      // If we get a RecvError at this point, it also means the channel closed in the meantime
-      // we can assume the connection is closed
-      return Ok(());
+      // Return the error from `conn.close()` if any.
+      result?;
+
+      return Ok(true);
+    };
+
+    let mut errors = vec![];
+    if let Err(err) = closer(&self.writer).await {
+      errors.push(Error::Close(err));
     };
 
     loop {
-      let (sender, receiver) = oneshot::channel::<std::result::Result<(), rusqlite::Error>>();
-      if let Err(crossbeam_channel::SendError(_)) = self.state.reader.send(Message::Close(sender)) {
-        break;
+      match closer(&self.reader).await {
+        Ok(closed) => {
+          if !closed {
+            break;
+          }
+        }
+        Err(err) => {
+          errors.push(Error::Close(err));
+        }
       }
-      let Ok(_result) = receiver.await else {
-        break;
-      };
     }
 
-    result.map_err(|e| Error::Close(self, e))?;
+    if !errors.is_empty() {
+      warn!("Closing connection: {errors:?}");
+      return Err(errors.swap_remove(0));
+    }
+
     return Ok(());
   }
 }

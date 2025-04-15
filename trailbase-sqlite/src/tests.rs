@@ -3,14 +3,14 @@ use rusqlite::hooks::PreUpdateCase;
 use serde::Deserialize;
 use std::borrow::Cow;
 
-use crate::connection::extract_row_id;
-use crate::{named_params, params, Connection, Error, Value, ValueType};
+use crate::connection::{extract_row_id, Connection, Error, Options};
+use crate::{named_params, params, Value, ValueType};
 use rusqlite::ErrorCode;
 
 #[tokio::test]
 async fn open_in_memory_test() {
-  let conn = Connection::open_in_memory();
-  assert!(conn.is_ok());
+  let conn = Connection::open_in_memory().unwrap();
+  assert!(conn.close().await.is_ok());
 }
 
 #[tokio::test]
@@ -57,7 +57,38 @@ async fn call_failure_test() {
 
 #[tokio::test]
 async fn close_success_test() {
-  let conn = Connection::open_in_memory().unwrap();
+  let tmp_dir = tempfile::TempDir::new().unwrap();
+  let fname = tmp_dir.path().join("main.sqlite");
+
+  let conn = Connection::new(
+    move || rusqlite::Connection::open(&fname),
+    Some(Options {
+      n_read_threads: 2,
+      ..Default::default()
+    }),
+  )
+  .unwrap();
+
+  conn
+    .execute("CREATE TABLE 'test' (id INTEGER PRIMARY KEY)", ())
+    .await
+    .unwrap();
+  conn
+    .execute_batch(
+      r#"
+      INSERT INTO 'test' (id) VALUES (1);
+      INSERT INTO 'test' (id) VALUES (2);
+    "#,
+    )
+    .await
+    .unwrap();
+
+  let rows = conn
+    .read_query_rows("SELECT * FROM 'test'", ())
+    .await
+    .unwrap();
+
+  assert_eq!(rows.len(), 2);
 
   assert!(conn.close().await.is_ok());
 }
@@ -118,7 +149,7 @@ async fn close_failure_test() {
     .unwrap();
 
   assert!(match conn.close().await.unwrap_err() {
-    crate::Error::Close(_, e) => {
+    crate::Error::Close(e) => {
       e == rusqlite::Error::SqliteFailure(
         ffi::Error {
           code: ErrorCode::DatabaseBusy,
