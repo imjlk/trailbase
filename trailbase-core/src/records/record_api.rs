@@ -662,7 +662,7 @@ fn validate_expr_recursively(expr: &sqlite3_parser::ast::Expr) -> Result<(), Str
         ast::QualifiedName {
           name: ast::Name(name),
           ..
-        } if name == "_FIELDS_" => {
+        } if name == "_REQ_FIELDS_" => {
           if !matches!(**lhs, ast::Expr::Literal(ast::Literal::String(_))) {
             return Err(format!("Expected literal string: {lhs:?}"));
           }
@@ -955,7 +955,7 @@ mod tests {
     validate_rule("_USER_.id IS NOT NULL AND _ROW_.userid = _USER_.id").unwrap();
     validate_rule("_USER_.id IS NOT NULL AND _REQ_.field IS NOT NULL").unwrap();
 
-    assert!(validate_rule("'field' IN _FIELDS_").is_ok());
-    assert!(validate_rule("field IN _FIELDS_").is_err());
+    assert!(validate_rule("'field' IN _REQ_FIELDS_").is_ok());
+    assert!(validate_rule("field IN _REQ_FIELDS_").is_err());
   }
 }

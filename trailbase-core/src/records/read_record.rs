@@ -928,8 +928,8 @@ mod test {
         ..Default::default()
       },
       AccessRules {
-        // update: Some("('col0' in _FIELDS_)".to_string()),
-        create: Some("('col0' NOT IN _FIELDS_)".to_string()),
+        // update: Some("('col0' in _REQ_FIELDS_)".to_string()),
+        create: Some("('col0' NOT IN _REQ_FIELDS_)".to_string()),
         ..Default::default()
       },
     )
