@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trailbase_sqlite::connection::{Connection, Options};
 
-use crate::connection::{AsyncConnection, SharedRusqlite, ThreadLocalRusqlite};
+use crate::connection::{AsyncConnection, MutexRusqlite, ThreadLocalRusqlite};
 use crate::error::BenchmarkError;
 
 fn try_init_logger() {
@@ -163,7 +163,7 @@ fn insert_benchmark_group(c: &mut Criterion) {
 
   group.bench_function("locked-rusqlite", |b| {
     async_insert_benchmark(b, async |fname| {
-      Ok(SharedRusqlite(Mutex::new(rusqlite::Connection::open(
+      Ok(MutexRusqlite(Mutex::new(rusqlite::Connection::open(
         &fname,
       )?)))
     })
@@ -298,7 +298,7 @@ fn read_benchmark_group(c: &mut Criterion) {
 
   group.bench_function("locked-rusqlite", |b| {
     async_read_benchmark(b, async |fname| {
-      Ok(SharedRusqlite(Mutex::new(rusqlite::Connection::open(
+      Ok(MutexRusqlite(Mutex::new(rusqlite::Connection::open(
         &fname,
       )?)))
     })
@@ -420,8 +420,8 @@ fn mixed_benchmark_group(c: &mut Criterion) {
   info!("Running mixed benchmarks");
 
   let mut group = c.benchmark_group("QueryMix");
-  group.measurement_time(Duration::from_secs(10));
-  group.sample_size(200);
+  group.measurement_time(Duration::from_secs(5));
+  group.sample_size(100);
   group.throughput(Throughput::Elements(1));
 
   group.bench_function("trailbase-sqlite (1 thread)", |b| {
@@ -471,7 +471,7 @@ fn mixed_benchmark_group(c: &mut Criterion) {
 
   group.bench_function("locked-rusqlite", |b| {
     async_mixed_benchmark(b, async |fname| {
-      Ok(SharedRusqlite(Mutex::new(rusqlite::Connection::open(
+      Ok(MutexRusqlite(Mutex::new(rusqlite::Connection::open(
         &fname,
       )?)))
     });

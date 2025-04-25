@@ -64,9 +64,9 @@ impl AsyncConnection for Connection {
 
 /// Only meant for reference. This implementation is ill-suited since it can clog-up the tokio
 /// runtime with sync sqlite calls.
-pub struct SharedRusqlite(pub Mutex<rusqlite::Connection>);
+pub struct MutexRusqlite(pub Mutex<rusqlite::Connection>);
 
-impl AsyncConnection for SharedRusqlite {
+impl AsyncConnection for MutexRusqlite {
   async fn async_query<T: FromSql + Send + 'static>(
     &self,
     sql: impl Into<String> + Send,

@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, Sender};
+use kanal::{Receiver, Sender};
 use log::*;
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::hooks::{Action, PreUpdateCase};
@@ -90,7 +90,7 @@ impl Connection {
       return Ok(name);
     };
 
-    let (shared_write_sender, shared_write_receiver) = crossbeam_channel::unbounded::<Message>();
+    let (shared_write_sender, shared_write_receiver) = kanal::unbounded::<Message>();
     let name = spawn(shared_write_receiver)?;
 
     let n_read_threads = if name.is_some() {
@@ -120,7 +120,7 @@ impl Connection {
     };
 
     let shared_read_sender = if n_read_threads > 0 {
-      let (shared_read_sender, shared_read_receiver) = crossbeam_channel::unbounded::<Message>();
+      let (shared_read_sender, shared_read_receiver) = kanal::unbounded::<Message>();
       for _ in 0..n_read_threads {
         spawn(shared_read_receiver.clone())?;
       }
@@ -398,7 +398,7 @@ impl Connection {
     // Returns true if connection was successfully closed.
     let closer = async |s: &Sender<Message>| -> std::result::Result<bool, rusqlite::Error> {
       let (sender, receiver) = oneshot::channel::<std::result::Result<(), rusqlite::Error>>();
-      if let Err(crossbeam_channel::SendError(_)) = s.send(Message::Close(sender)) {
+      if let Err(_) = s.send(Message::Close(sender)) {
         // If the channel is closed on the other side, it means the connection closed successfully
         // This is a safeguard against calling close on a `Copy` of the connection
         return Ok(false);
